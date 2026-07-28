@@ -2,6 +2,30 @@ import { clamp } from "./errors";
 
 export type InkTool = "pen" | "highlighter" | "eraser";
 
+/** Finger gesture shortcuts (not ink). */
+export type FingerAction =
+  | "none"
+  | "cycle_tool"
+  | "undo"
+  | "redo"
+  | "toggle_nav"
+  | "pen"
+  | "highlighter"
+  | "eraser"
+  | "exit";
+
+export const FINGER_ACTION_LABELS: Record<FingerAction, string> = {
+  none: "None",
+  cycle_tool: "Cycle tool",
+  undo: "Undo",
+  redo: "Redo",
+  toggle_nav: "Toggle navigate",
+  pen: "Pen",
+  highlighter: "Highlighter",
+  eraser: "Eraser",
+  exit: "Leave (save)",
+};
+
 export const PEN_COLORS = [
   "#1a1a1a",
   "#e03131",
@@ -40,10 +64,23 @@ export interface PyoInkSettings {
   /** Idle ms with no ink before auto-save (default 12s). Always save on leave. */
   debounceMs: number;
   maxCanvasCssHeight: number;
+  /** Undo/redo history depth (queue, max 50). */
   undoLimit: number;
-  /** Toolbar position as % of root (draggable) */
   toolbarXPct: number;
   toolbarYPct: number;
+  /** Two-finger short tap */
+  twoFingerTapAction: FingerAction;
+  /** Three-finger short tap */
+  threeFingerTapAction: FingerAction;
+  /** Single-finger double-tap */
+  doubleTapAction: FingerAction;
+}
+
+const FINGER_ACTIONS = new Set<string>(Object.keys(FINGER_ACTION_LABELS));
+
+function asFingerAction(v: unknown, fallback: FingerAction): FingerAction {
+  const s = String(v || "");
+  return FINGER_ACTIONS.has(s) ? (s as FingerAction) : fallback;
 }
 
 export const DEFAULT_SETTINGS: PyoInkSettings = {
@@ -64,12 +101,14 @@ export const DEFAULT_SETTINGS: PyoInkSettings = {
   pfSmoothing: 0.5,
   pfThinning: 0.5,
   pfStreamline: 0.5,
-  // Save only after 12s with no writing, or on leave
   debounceMs: 12000,
   maxCanvasCssHeight: 8192,
-  undoLimit: 40,
+  undoLimit: 50,
   toolbarXPct: 50,
   toolbarYPct: 92,
+  twoFingerTapAction: "cycle_tool",
+  threeFingerTapAction: "undo",
+  doubleTapAction: "toggle_nav",
 };
 
 export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined): PyoInkSettings {
@@ -88,7 +127,8 @@ export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined
   s.pfStreamline = clamp(Number(s.pfStreamline), 0, 0.99);
   s.debounceMs = clamp(Number(s.debounceMs), 1000, 60000);
   s.maxCanvasCssHeight = clamp(Number(s.maxCanvasCssHeight), 2048, 16384);
-  s.undoLimit = clamp(Number(s.undoLimit), 10, 200);
+  // Hard cap 50-depth queue
+  s.undoLimit = clamp(Number(s.undoLimit), 1, 50);
   s.palmRejectMs = clamp(Number(s.palmRejectMs), 0, 3000);
   s.toolbarXPct = clamp(Number(s.toolbarXPct), 5, 95);
   s.toolbarYPct = clamp(Number(s.toolbarYPct), 5, 95);
@@ -96,6 +136,13 @@ export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined
   if (s.penOnlyInk) s.allowFingerDraw = false;
   if (!Array.isArray(s.toolCycle) || s.toolCycle.length === 0) {
     s.toolCycle = [...DEFAULT_SETTINGS.toolCycle];
+  }
+  s.twoFingerTapAction = asFingerAction(s.twoFingerTapAction, "cycle_tool");
+  s.threeFingerTapAction = asFingerAction(s.threeFingerTapAction, "undo");
+  s.doubleTapAction = asFingerAction(s.doubleTapAction, "toggle_nav");
+  // legacy: enableTwoFingerToolCycle false → none
+  if (s.enableTwoFingerToolCycle === false && s.twoFingerTapAction === "cycle_tool") {
+    s.twoFingerTapAction = "none";
   }
   return s;
 }

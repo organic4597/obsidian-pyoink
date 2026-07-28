@@ -13,7 +13,7 @@ import { measureLayout } from "../layout/LayoutSnapshot";
 import { emptyDoc, type InkDocV1 } from "../store/schema";
 import { InkStore } from "../store/InkStore";
 import type { InkTool } from "../util/settings";
-import { HI_COLORS, PEN_COLORS } from "../util/settings";
+import { HI_COLORS, PEN_COLORS, type FingerAction } from "../util/settings";
 import { inkLog } from "../util/errors";
 
 export const VIEW_TYPE_PYOINK = "pyoink-view";
@@ -669,7 +669,10 @@ export class PyoInkView extends ItemView {
         return;
       }
       case "tool-cycle":
-        this.cycleTool();
+        this.runFingerAction("cycle_tool");
+        return;
+      case "finger-action":
+        this.runFingerAction(action.action);
         return;
       case "draw-start":
       case "erase-start": {

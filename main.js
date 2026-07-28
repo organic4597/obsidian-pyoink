@@ -349,7 +349,8 @@ var StrokeEngine = class {
   }
   pushUndo() {
     this.undoStack.push(this.cloneStrokes(this.strokes));
-    if (this.undoStack.length > this.settings.undoLimit) this.undoStack.shift();
+    const limit = Math.min(50, Math.max(1, this.settings.undoLimit || 50));
+    while (this.undoStack.length > limit) this.undoStack.shift();
     this.redoStack = [];
   }
   beginPen(tool, color, size, pt) {
@@ -446,6 +447,8 @@ var StrokeEngine = class {
     if (this.isStroking()) return false;
     if (!this.undoStack.length) return false;
     this.redoStack.push(this.cloneStrokes(this.strokes));
+    const limit = Math.min(50, Math.max(1, this.settings.undoLimit || 50));
+    while (this.redoStack.length > limit) this.redoStack.shift();
     this.strokes = this.undoStack.pop();
     return true;
   }
@@ -453,6 +456,8 @@ var StrokeEngine = class {
     if (this.isStroking()) return false;
     if (!this.redoStack.length) return false;
     this.undoStack.push(this.cloneStrokes(this.strokes));
+    const limit = Math.min(50, Math.max(1, this.settings.undoLimit || 50));
+    while (this.undoStack.length > limit) this.undoStack.shift();
     this.strokes = this.redoStack.pop();
     return true;
   }
@@ -521,9 +526,12 @@ var GestureRouter = class {
     this.tool = "pen";
     this.navigateMode = false;
     this.fingerIds = /* @__PURE__ */ new Set();
-    this.twoFingerAnchor = null;
-    this.twoFingerMaxMove = 0;
-    this.lastCycleAt = 0;
+    this.multiFingerAnchor = null;
+    this.multiFingerMaxMove = 0;
+    this.lastShortcutAt = 0;
+    this.lastSingleTapAt = 0;
+    this.lastSingleTapX = 0;
+    this.lastSingleTapY = 0;
     this.downSample = null;
     this.movedPx = 0;
   }
@@ -543,14 +551,12 @@ var GestureRouter = class {
     this.activeDrawId = null;
     this.activeDrawType = null;
   }
-  /** True if Apple Pencil / stylus should own the surface. */
   penOwnsSurface(s2) {
     if (this.penDownIds.size > 0) return true;
     if (this.activeDrawType === "pen") return true;
     if (performance.now() - this.lastPenAt < (s2.palmRejectMs ?? 600)) return true;
     return false;
   }
-  /** Finger must never ink when penOnlyInk (default). */
   fingerMayDraw(s2) {
     if (s2.penOnlyInk !== false) return false;
     if (!s2.allowFingerDraw) return false;
@@ -577,10 +583,10 @@ var GestureRouter = class {
         if (this.activeDrawId !== null && this.activeDrawType === "touch") {
           const id = this.activeDrawId;
           this.clearActiveDraw();
-          this.armTwoFinger(sample);
+          this.armMulti(sample, this.fingerIds.size);
           return { type: "draw-end", pointerId: id };
         }
-        this.armTwoFinger(sample);
+        this.armMulti(sample, this.fingerIds.size);
         return { type: "ignore" };
       }
       if (!this.fingerMayDraw(s2)) {
@@ -621,10 +627,11 @@ var GestureRouter = class {
     if (ev.pointerType === "touch" && this.penOwnsSurface(s2)) {
       return { type: "ignore" };
     }
-    if (this.fingerIds.size >= 2 && this.twoFingerAnchor) {
-      const dx = sample.x - this.twoFingerAnchor.x;
-      const dy = sample.y - this.twoFingerAnchor.y;
-      this.twoFingerMaxMove = Math.max(this.twoFingerMaxMove, Math.hypot(dx, dy));
+    if (this.fingerIds.size >= 2 && this.multiFingerAnchor) {
+      this.multiFingerAnchor.count = Math.max(this.multiFingerAnchor.count, this.fingerIds.size);
+      const dx = sample.x - this.multiFingerAnchor.x;
+      const dy = sample.y - this.multiFingerAnchor.y;
+      this.multiFingerMaxMove = Math.max(this.multiFingerMaxMove, Math.hypot(dx, dy));
       return { type: "ignore" };
     }
     if (ev.pointerType === "touch" && s2.penOnlyInk !== false) {
@@ -653,14 +660,34 @@ var GestureRouter = class {
     }
     if (ev.pointerType === "touch") {
       this.fingerIds.delete(ev.pointerId);
-      if (this.fingerIds.size === 0 && this.twoFingerAnchor) {
-        const dt = performance.now() - this.twoFingerAnchor.t;
-        const move = this.twoFingerMaxMove;
-        this.twoFingerAnchor = null;
-        this.twoFingerMaxMove = 0;
-        if (!this.penOwnsSurface(s2) && s2.enableTwoFingerToolCycle && dt < 320 && move < 18 && performance.now() - this.lastCycleAt > 200) {
-          this.lastCycleAt = performance.now();
-          return { type: "tool-cycle" };
+      if (this.fingerIds.size === 0 && this.multiFingerAnchor) {
+        const dt = performance.now() - this.multiFingerAnchor.t;
+        const move = this.multiFingerMaxMove;
+        const count = this.multiFingerAnchor.count;
+        this.multiFingerAnchor = null;
+        this.multiFingerMaxMove = 0;
+        if (!this.penOwnsSurface(s2) && dt < 380 && move < 22 && performance.now() - this.lastShortcutAt > 220) {
+          const action = count >= 3 ? s2.threeFingerTapAction : s2.twoFingerTapAction || (s2.enableTwoFingerToolCycle ? "cycle_tool" : "none");
+          if (action && action !== "none") {
+            this.lastShortcutAt = performance.now();
+            return { type: "finger-action", action };
+          }
+        }
+      }
+      if (this.fingerIds.size === 0 && !this.multiFingerAnchor && this.activeDrawId === null && !this.penOwnsSurface(s2) && this.movedPx < 14) {
+        const now = performance.now();
+        const sample = this.sampleFromEvent(ev, canvasRect);
+        if (now - this.lastSingleTapAt < 320 && Math.hypot(sample.x - this.lastSingleTapX, sample.y - this.lastSingleTapY) < 40) {
+          this.lastSingleTapAt = 0;
+          const action = s2.doubleTapAction;
+          if (action && action !== "none" && now - this.lastShortcutAt > 220) {
+            this.lastShortcutAt = now;
+            return { type: "finger-action", action };
+          }
+        } else {
+          this.lastSingleTapAt = now;
+          this.lastSingleTapX = sample.x;
+          this.lastSingleTapY = sample.y;
         }
       }
     }
@@ -690,9 +717,14 @@ var GestureRouter = class {
     }
     return { type: "ignore" };
   }
-  armTwoFinger(sample) {
-    this.twoFingerAnchor = { x: sample.x, y: sample.y, t: performance.now() };
-    this.twoFingerMaxMove = 0;
+  armMulti(sample, count) {
+    this.multiFingerAnchor = {
+      x: sample.x,
+      y: sample.y,
+      t: performance.now(),
+      count
+    };
+    this.multiFingerMaxMove = 0;
   }
   sampleFromEvent(ev, rect) {
     return {
@@ -1018,6 +1050,17 @@ var InkStore = class {
 };
 
 // src/util/settings.ts
+var FINGER_ACTION_LABELS = {
+  none: "None",
+  cycle_tool: "Cycle tool",
+  undo: "Undo",
+  redo: "Redo",
+  toggle_nav: "Toggle navigate",
+  pen: "Pen",
+  highlighter: "Highlighter",
+  eraser: "Eraser",
+  exit: "Leave (save)"
+};
 var PEN_COLORS = [
   "#1a1a1a",
   "#e03131",
@@ -1033,6 +1076,11 @@ var HI_COLORS = [
   "#74c0fc",
   "#f783ac"
 ];
+var FINGER_ACTIONS = new Set(Object.keys(FINGER_ACTION_LABELS));
+function asFingerAction(v2, fallback) {
+  const s2 = String(v2 || "");
+  return FINGER_ACTIONS.has(s2) ? s2 : fallback;
+}
 var DEFAULT_SETTINGS = {
   annotationsFolder: "PyoInk",
   penColor: "#1a1a1a",
@@ -1051,12 +1099,14 @@ var DEFAULT_SETTINGS = {
   pfSmoothing: 0.5,
   pfThinning: 0.5,
   pfStreamline: 0.5,
-  // Save only after 12s with no writing, or on leave
   debounceMs: 12e3,
   maxCanvasCssHeight: 8192,
-  undoLimit: 40,
+  undoLimit: 50,
   toolbarXPct: 50,
-  toolbarYPct: 92
+  toolbarYPct: 92,
+  twoFingerTapAction: "cycle_tool",
+  threeFingerTapAction: "undo",
+  doubleTapAction: "toggle_nav"
 };
 function sanitizeSettings(raw) {
   const s2 = Object.assign({}, DEFAULT_SETTINGS, raw ?? {});
@@ -1074,7 +1124,7 @@ function sanitizeSettings(raw) {
   s2.pfStreamline = clamp(Number(s2.pfStreamline), 0, 0.99);
   s2.debounceMs = clamp(Number(s2.debounceMs), 1e3, 6e4);
   s2.maxCanvasCssHeight = clamp(Number(s2.maxCanvasCssHeight), 2048, 16384);
-  s2.undoLimit = clamp(Number(s2.undoLimit), 10, 200);
+  s2.undoLimit = clamp(Number(s2.undoLimit), 1, 50);
   s2.palmRejectMs = clamp(Number(s2.palmRejectMs), 0, 3e3);
   s2.toolbarXPct = clamp(Number(s2.toolbarXPct), 5, 95);
   s2.toolbarYPct = clamp(Number(s2.toolbarYPct), 5, 95);
@@ -1082,6 +1132,12 @@ function sanitizeSettings(raw) {
   if (s2.penOnlyInk) s2.allowFingerDraw = false;
   if (!Array.isArray(s2.toolCycle) || s2.toolCycle.length === 0) {
     s2.toolCycle = [...DEFAULT_SETTINGS.toolCycle];
+  }
+  s2.twoFingerTapAction = asFingerAction(s2.twoFingerTapAction, "cycle_tool");
+  s2.threeFingerTapAction = asFingerAction(s2.threeFingerTapAction, "undo");
+  s2.doubleTapAction = asFingerAction(s2.doubleTapAction, "toggle_nav");
+  if (s2.enableTwoFingerToolCycle === false && s2.twoFingerTapAction === "cycle_tool") {
+    s2.twoFingerTapAction = "none";
   }
   return s2;
 }
@@ -1640,7 +1696,10 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         return;
       }
       case "tool-cycle":
-        this.cycleTool();
+        this.runFingerAction("cycle_tool");
+        return;
+      case "finger-action":
+        this.runFingerAction(action.action);
         return;
       case "draw-start":
       case "erase-start": {
@@ -1941,20 +2000,49 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "PyoInk" });
     containerEl.createEl("p", {
-      text: "Transparent ink on Markdown. Pen-only by default. Saves only after idle / exit (not every stroke)."
+      text: "Transparent ink on Markdown. Pen draws; finger gestures are shortcuts. Auto-save after 12s idle or on leave."
     });
-    new import_obsidian3.Setting(containerEl).setName("Pen-only ink").setDesc("Only Apple Pencil draws. Finger scrolls.").addToggle(
+    new import_obsidian3.Setting(containerEl).setName("Pen-only ink").setDesc("Only Apple Pencil draws. Finger = scroll / shortcuts.").addToggle(
       (t2) => t2.setValue(this.plugin.settings.penOnlyInk !== false).onChange(async (v2) => {
         this.plugin.settings.penOnlyInk = v2;
         if (v2) this.plugin.settings.allowFingerDraw = false;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Idle save delay (ms)").setDesc("Default 12000ms (12s) with no writing. Always saves when leaving PyoInk.").addSlider(
+    new import_obsidian3.Setting(containerEl).setName("Idle save delay (ms)").setDesc("Default 12000 (12s) with no writing. Always saves when leaving.").addSlider(
       (s2) => s2.setLimits(12e3, 3e4, 1e3).setValue(this.plugin.settings.debounceMs).setDynamicTooltip().onChange(async (v2) => {
         this.plugin.settings.debounceMs = v2;
         await this.plugin.saveSettings();
       })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Undo / Redo stack size").setDesc("Queue depth (max 50). Oldest dropped when full.").addSlider(
+      (s2) => s2.setLimits(10, 50, 1).setValue(this.plugin.settings.undoLimit).setDynamicTooltip().onChange(async (v2) => {
+        this.plugin.settings.undoLimit = v2;
+        await this.plugin.saveSettings();
+      })
+    );
+    containerEl.createEl("h3", { text: "Finger shortcuts" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "Assign actions to finger taps (not pencil). Short taps only; move = scroll."
+    });
+    this.fingerDropdown(
+      containerEl,
+      "Two-finger tap",
+      "twoFingerTapAction",
+      this.plugin.settings.twoFingerTapAction
+    );
+    this.fingerDropdown(
+      containerEl,
+      "Three-finger tap",
+      "threeFingerTapAction",
+      this.plugin.settings.threeFingerTapAction
+    );
+    this.fingerDropdown(
+      containerEl,
+      "Double-tap (one finger)",
+      "doubleTapAction",
+      this.plugin.settings.doubleTapAction
     );
     new import_obsidian3.Setting(containerEl).setName("Annotations folder").addText(
       (t2) => t2.setValue(this.plugin.settings.annotationsFolder).onChange(async (v2) => {
@@ -1965,5 +2053,20 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+  }
+  fingerDropdown(containerEl, name, key, value) {
+    new import_obsidian3.Setting(containerEl).setName(name).addDropdown((d2) => {
+      for (const [id, label] of Object.entries(FINGER_ACTION_LABELS)) {
+        d2.addOption(id, label);
+      }
+      d2.setValue(value);
+      d2.onChange(async (v2) => {
+        this.plugin.settings[key] = v2;
+        if (key === "twoFingerTapAction") {
+          this.plugin.settings.enableTwoFingerToolCycle = v2 !== "none";
+        }
+        await this.plugin.saveSettings();
+      });
+    });
   }
 };

@@ -1,6 +1,12 @@
 import { Notice, Plugin, PluginSettingTab, Setting, TFile } from "obsidian";
 import { PyoInkView, VIEW_TYPE_PYOINK } from "./src/view/PyoInkView";
-import { DEFAULT_SETTINGS, sanitizeSettings, type PyoInkSettings } from "./src/util/settings";
+import {
+  DEFAULT_SETTINGS,
+  FINGER_ACTION_LABELS,
+  sanitizeSettings,
+  type FingerAction,
+  type PyoInkSettings,
+} from "./src/util/settings";
 
 export default class PyoInkPlugin extends Plugin {
   settings: PyoInkSettings = DEFAULT_SETTINGS;
@@ -66,12 +72,12 @@ class PyoInkSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "PyoInk" });
     containerEl.createEl("p", {
-      text: "Transparent ink on Markdown. Pen-only by default. Saves only after idle / exit (not every stroke).",
+      text: "Transparent ink on Markdown. Pen draws; finger gestures are shortcuts. Auto-save after 12s idle or on leave.",
     });
 
     new Setting(containerEl)
       .setName("Pen-only ink")
-      .setDesc("Only Apple Pencil draws. Finger scrolls.")
+      .setDesc("Only Apple Pencil draws. Finger = scroll / shortcuts.")
       .addToggle((t) =>
         t.setValue(this.plugin.settings.penOnlyInk !== false).onChange(async (v) => {
           this.plugin.settings.penOnlyInk = v;
@@ -82,7 +88,7 @@ class PyoInkSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Idle save delay (ms)")
-      .setDesc("Default 12000ms (12s) with no writing. Always saves when leaving PyoInk.")
+      .setDesc("Default 12000 (12s) with no writing. Always saves when leaving.")
       .addSlider((s) =>
         s
           .setLimits(12000, 30000, 1000)
@@ -95,6 +101,45 @@ class PyoInkSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Undo / Redo stack size")
+      .setDesc("Queue depth (max 50). Oldest dropped when full.")
+      .addSlider((s) =>
+        s
+          .setLimits(10, 50, 1)
+          .setValue(this.plugin.settings.undoLimit)
+          .setDynamicTooltip()
+          .onChange(async (v) => {
+            this.plugin.settings.undoLimit = v;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    containerEl.createEl("h3", { text: "Finger shortcuts" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "Assign actions to finger taps (not pencil). Short taps only; move = scroll.",
+    });
+
+    this.fingerDropdown(
+      containerEl,
+      "Two-finger tap",
+      "twoFingerTapAction",
+      this.plugin.settings.twoFingerTapAction,
+    );
+    this.fingerDropdown(
+      containerEl,
+      "Three-finger tap",
+      "threeFingerTapAction",
+      this.plugin.settings.threeFingerTapAction,
+    );
+    this.fingerDropdown(
+      containerEl,
+      "Double-tap (one finger)",
+      "doubleTapAction",
+      this.plugin.settings.doubleTapAction,
+    );
+
+    new Setting(containerEl)
       .setName("Annotations folder")
       .addText((t) =>
         t.setValue(this.plugin.settings.annotationsFolder).onChange(async (v) => {
@@ -105,5 +150,27 @@ class PyoInkSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }),
       );
+  }
+
+  private fingerDropdown(
+    containerEl: HTMLElement,
+    name: string,
+    key: "twoFingerTapAction" | "threeFingerTapAction" | "doubleTapAction",
+    value: FingerAction,
+  ) {
+    new Setting(containerEl).setName(name).addDropdown((d) => {
+      for (const [id, label] of Object.entries(FINGER_ACTION_LABELS)) {
+        d.addOption(id, label);
+      }
+      d.setValue(value);
+      d.onChange(async (v) => {
+        this.plugin.settings[key] = v as FingerAction;
+        // keep legacy flag in sync
+        if (key === "twoFingerTapAction") {
+          this.plugin.settings.enableTwoFingerToolCycle = v !== "none";
+        }
+        await this.plugin.saveSettings();
+      });
+    });
   }
 }

@@ -1,9 +1,9 @@
 {
   "id": "pyoink",
   "name": "PyoInk",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "minAppVersion": "1.5.0",
-  "description": "Ink on Markdown. Undo/redo, eraser preview, colors & width, 12s idle save, leave to save.",
+  "description": "Ink on Markdown. 50-step undo/redo queue, finger-tap shortcuts, 12s idle save.",
   "author": "organic4597",
   "authorUrl": "https://github.com/organic4597",
   "isDesktopOnly": false

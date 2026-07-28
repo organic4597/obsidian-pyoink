@@ -42,9 +42,11 @@ export class StrokeEngine {
   }
 
   private pushUndo() {
+    // FIFO queue: drop oldest when over undoLimit (cap 50 in settings)
     this.undoStack.push(this.cloneStrokes(this.strokes));
-    if (this.undoStack.length > this.settings.undoLimit) this.undoStack.shift();
-    // new branch kills redo
+    const limit = Math.min(50, Math.max(1, this.settings.undoLimit || 50));
+    while (this.undoStack.length > limit) this.undoStack.shift();
+    // new branch kills redo (also queue-capped)
     this.redoStack = [];
   }
 
@@ -151,6 +153,8 @@ export class StrokeEngine {
     if (this.isStroking()) return false;
     if (!this.undoStack.length) return false;
     this.redoStack.push(this.cloneStrokes(this.strokes));
+    const limit = Math.min(50, Math.max(1, this.settings.undoLimit || 50));
+    while (this.redoStack.length > limit) this.redoStack.shift();
     this.strokes = this.undoStack.pop()!;
     return true;
   }
@@ -159,6 +163,8 @@ export class StrokeEngine {
     if (this.isStroking()) return false;
     if (!this.redoStack.length) return false;
     this.undoStack.push(this.cloneStrokes(this.strokes));
+    const limit = Math.min(50, Math.max(1, this.settings.undoLimit || 50));
+    while (this.undoStack.length > limit) this.undoStack.shift();
     this.strokes = this.redoStack.pop()!;
     return true;
   }

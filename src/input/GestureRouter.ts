@@ -1,5 +1,4 @@
-import type { InkTool } from "../util/settings";
-import type { PyoInkSettings } from "../util/settings";
+import type { InkTool, FingerAction, PyoInkSettings } from "../util/settings";
 import { inkLog } from "../util/errors";
 
 export type GestureAction =
@@ -10,6 +9,8 @@ export type GestureAction =
   | { type: "erase-start"; pointerId: number }
   | { type: "draw-move"; pointerId: number; samples: Sample[] }
   | { type: "draw-end"; pointerId: number }
+  | { type: "finger-action"; action: FingerAction }
+  /** @deprecated use finger-action */
   | { type: "tool-cycle" };
 
 export interface Sample {
@@ -21,12 +22,8 @@ export interface Sample {
 }
 
 /**
- * Transparent-overlay pointer rules (iPad-first):
- *
- * - **pen (Apple Pencil)**: only input that draws/erases when penOnlyInk=true
- * - **touch (hand/finger)**: NEVER ink while pen-only; scroll OR two-finger tool cycle
- * - **while pen is down**: touch is fully ignored (palm reject — no accidental ink/scroll jump)
- * - **mouse**: draws on desktop; not treated as hand
+ * - pen: ink
+ * - touch: scroll / multi-finger / double-tap shortcuts (never ink when penOnly)
  */
 export class GestureRouter {
   private activeDrawId: number | null = null;
@@ -38,9 +35,13 @@ export class GestureRouter {
   navigateMode = false;
 
   private fingerIds = new Set<number>();
-  private twoFingerAnchor: { x: number; y: number; t: number } | null = null;
-  private twoFingerMaxMove = 0;
-  private lastCycleAt = 0;
+  private multiFingerAnchor: { x: number; y: number; t: number; count: number } | null = null;
+  private multiFingerMaxMove = 0;
+  private lastShortcutAt = 0;
+
+  private lastSingleTapAt = 0;
+  private lastSingleTapX = 0;
+  private lastSingleTapY = 0;
 
   private downSample: Sample | null = null;
   private movedPx = 0;
@@ -68,18 +69,15 @@ export class GestureRouter {
     this.activeDrawType = null;
   }
 
-  /** True if Apple Pencil / stylus should own the surface. */
   private penOwnsSurface(s: PyoInkSettings): boolean {
     if (this.penDownIds.size > 0) return true;
     if (this.activeDrawType === "pen") return true;
-    // After pen lift, keep palm blocked briefly
     if (performance.now() - this.lastPenAt < (s.palmRejectMs ?? 600)) return true;
     return false;
   }
 
-  /** Finger must never ink when penOnlyInk (default). */
   private fingerMayDraw(s: PyoInkSettings): boolean {
-    if (s.penOnlyInk !== false) return false; // default hard off
+    if (s.penOnlyInk !== false) return false;
     if (!s.allowFingerDraw) return false;
     if (this.penOwnsSurface(s)) return false;
     return true;
@@ -97,9 +95,7 @@ export class GestureRouter {
       this.lastPenAt = performance.now();
     }
 
-    // --- TOUCH / HAND ---
     if (ev.pointerType === "touch") {
-      // Pen active or recent → palm: ignore completely (no ink, no scroll jump)
       if (this.penOwnsSurface(s)) {
         inkLog("E_PALM");
         return { type: "ignore" };
@@ -107,32 +103,26 @@ export class GestureRouter {
 
       this.fingerIds.add(ev.pointerId);
 
-      // Two-finger tool cycle (not ink)
       if (this.fingerIds.size >= 2) {
         if (this.activeDrawId !== null && this.activeDrawType === "touch") {
-          // shouldn't happen under penOnlyInk; end if any
           const id = this.activeDrawId;
           this.clearActiveDraw();
-          this.armTwoFinger(sample);
+          this.armMulti(sample, this.fingerIds.size);
           return { type: "draw-end", pointerId: id };
         }
-        this.armTwoFinger(sample);
+        this.armMulti(sample, this.fingerIds.size);
         return { type: "ignore" };
       }
 
-      // Single finger: scroll only (never ink when penOnlyInk)
       if (!this.fingerMayDraw(s)) {
         return { type: "scroll" };
       }
-      // finger draw allowed (explicit settings) — fall through
     }
 
-    // Navigate mode: only pen draws
     if (this.navigateMode && ev.pointerType !== "pen") {
       return { type: "ignore" };
     }
 
-    // Block any non-pen draw when penOnlyInk (except mouse for desktop)
     if (s.penOnlyInk !== false && ev.pointerType === "touch") {
       return { type: "scroll" };
     }
@@ -142,7 +132,6 @@ export class GestureRouter {
       return { type: "ignore" };
     }
 
-    // Safety: never start draw with touch if penOnlyInk
     if (ev.pointerType === "touch" && s.penOnlyInk !== false) {
       return { type: "scroll" };
     }
@@ -169,19 +158,19 @@ export class GestureRouter {
       this.movedPx = Math.max(this.movedPx, Math.hypot(dx, dy));
     }
 
-    // Touch while pen owns surface → ignore
     if (ev.pointerType === "touch" && this.penOwnsSurface(s)) {
       return { type: "ignore" };
     }
 
-    if (this.fingerIds.size >= 2 && this.twoFingerAnchor) {
-      const dx = sample.x - this.twoFingerAnchor.x;
-      const dy = sample.y - this.twoFingerAnchor.y;
-      this.twoFingerMaxMove = Math.max(this.twoFingerMaxMove, Math.hypot(dx, dy));
+    if (this.fingerIds.size >= 2 && this.multiFingerAnchor) {
+      // update peak finger count while held
+      this.multiFingerAnchor.count = Math.max(this.multiFingerAnchor.count, this.fingerIds.size);
+      const dx = sample.x - this.multiFingerAnchor.x;
+      const dy = sample.y - this.multiFingerAnchor.y;
+      this.multiFingerMaxMove = Math.max(this.multiFingerMaxMove, Math.hypot(dx, dy));
       return { type: "ignore" };
     }
 
-    // Never turn touch moves into ink under penOnlyInk
     if (ev.pointerType === "touch" && s.penOnlyInk !== false) {
       return { type: "ignore" };
     }
@@ -190,7 +179,6 @@ export class GestureRouter {
       return { type: "ignore" };
     }
 
-    // If draw session was somehow touch under pen-only, kill it
     if (this.activeDrawType === "touch" && s.penOnlyInk !== false) {
       const id = this.activeDrawId;
       this.clearActiveDraw();
@@ -215,21 +203,56 @@ export class GestureRouter {
 
     if (ev.pointerType === "touch") {
       this.fingerIds.delete(ev.pointerId);
-      if (this.fingerIds.size === 0 && this.twoFingerAnchor) {
-        const dt = performance.now() - this.twoFingerAnchor.t;
-        const move = this.twoFingerMaxMove;
-        this.twoFingerAnchor = null;
-        this.twoFingerMaxMove = 0;
-        // only cycle if pen does not own surface
+
+      // multi-finger shortcut when all fingers up
+      if (this.fingerIds.size === 0 && this.multiFingerAnchor) {
+        const dt = performance.now() - this.multiFingerAnchor.t;
+        const move = this.multiFingerMaxMove;
+        const count = this.multiFingerAnchor.count;
+        this.multiFingerAnchor = null;
+        this.multiFingerMaxMove = 0;
+
         if (
           !this.penOwnsSurface(s) &&
-          s.enableTwoFingerToolCycle &&
-          dt < 320 &&
-          move < 18 &&
-          performance.now() - this.lastCycleAt > 200
+          dt < 380 &&
+          move < 22 &&
+          performance.now() - this.lastShortcutAt > 220
         ) {
-          this.lastCycleAt = performance.now();
-          return { type: "tool-cycle" };
+          const action =
+            count >= 3
+              ? s.threeFingerTapAction
+              : s.twoFingerTapAction || (s.enableTwoFingerToolCycle ? "cycle_tool" : "none");
+          if (action && action !== "none") {
+            this.lastShortcutAt = performance.now();
+            return { type: "finger-action", action };
+          }
+        }
+      }
+
+      // single-finger double-tap (scroll finger, not drawing)
+      if (
+        this.fingerIds.size === 0 &&
+        !this.multiFingerAnchor &&
+        this.activeDrawId === null &&
+        !this.penOwnsSurface(s) &&
+        this.movedPx < 14
+      ) {
+        const now = performance.now();
+        const sample = this.sampleFromEvent(ev, canvasRect);
+        if (
+          now - this.lastSingleTapAt < 320 &&
+          Math.hypot(sample.x - this.lastSingleTapX, sample.y - this.lastSingleTapY) < 40
+        ) {
+          this.lastSingleTapAt = 0;
+          const action = s.doubleTapAction;
+          if (action && action !== "none" && now - this.lastShortcutAt > 220) {
+            this.lastShortcutAt = now;
+            return { type: "finger-action", action };
+          }
+        } else {
+          this.lastSingleTapAt = now;
+          this.lastSingleTapX = sample.x;
+          this.lastSingleTapY = sample.y;
         }
       }
     }
@@ -275,9 +298,14 @@ export class GestureRouter {
     return { type: "ignore" };
   }
 
-  private armTwoFinger(sample: Sample) {
-    this.twoFingerAnchor = { x: sample.x, y: sample.y, t: performance.now() };
-    this.twoFingerMaxMove = 0;
+  private armMulti(sample: Sample, count: number) {
+    this.multiFingerAnchor = {
+      x: sample.x,
+      y: sample.y,
+      t: performance.now(),
+      count,
+    };
+    this.multiFingerMaxMove = 0;
   }
 
   sampleFromEvent(ev: PointerEvent, rect: DOMRect): Sample {
@@ -291,7 +319,6 @@ export class GestureRouter {
   }
 
   private collectSamples(ev: PointerEvent, rect: DOMRect): Sample[] {
-    // Drop coalesced samples that aren't pen when penOnlyInk and this is pen stroke
     const list =
       typeof ev.getCoalescedEvents === "function" ? ev.getCoalescedEvents() : [ev];
     return list.map((e) => this.sampleFromEvent(e, rect));
