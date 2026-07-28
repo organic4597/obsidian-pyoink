@@ -710,31 +710,6 @@ function measureLayout(contentEl, sourceMtime, sourceSize, maxCssHeight) {
     snapshotAt: Date.now()
   };
 }
-function detectDrift(saved, live, sourceExists) {
-  if (!sourceExists) return "broken";
-  if (!saved || !saved.sourceMtime && !saved.cssWidth) return "none";
-  if (saved.sourceMtime && live.sourceMtime && saved.sourceMtime !== live.sourceMtime) return "hard";
-  if (saved.sourceSize && live.sourceSize && saved.sourceSize !== live.sourceSize) return "hard";
-  if (saved.cssWidth > 0 && live.cssWidth > 0) {
-    const wr = Math.abs(saved.cssWidth - live.cssWidth) / saved.cssWidth;
-    const hr = saved.contentHeight > 0 ? Math.abs(saved.contentHeight - live.contentHeight) / saved.contentHeight : 0;
-    if (hr >= 0.2 || wr >= 0.15) return "hard";
-    if (hr >= 0.05 || wr >= 0.02) return "soft";
-  }
-  return "none";
-}
-function driftLabel(level) {
-  switch (level) {
-    case "soft":
-      return "layout shifted slightly";
-    case "hard":
-      return "note changed \u2014 ink may misalign";
-    case "broken":
-      return "source note missing";
-    default:
-      return "";
-  }
-}
 
 // src/store/schema.ts
 var PYOINK_MAGIC = "pyoink";
@@ -1029,6 +1004,73 @@ var InkStore = class {
   }
 };
 
+// src/util/settings.ts
+var PEN_COLORS = [
+  "#1a1a1a",
+  "#e03131",
+  "#1971c2",
+  "#2f9e44",
+  "#f08c00",
+  "#9c36b5"
+];
+var HI_COLORS = [
+  "#ffe566",
+  "#ff922b",
+  "#69db7c",
+  "#74c0fc",
+  "#f783ac"
+];
+var DEFAULT_SETTINGS = {
+  annotationsFolder: "PyoInk",
+  penColor: "#1a1a1a",
+  highlighterColor: "#ffe566",
+  penWidth: 2.4,
+  highlighterWidth: 16,
+  toolCycle: ["pen", "highlighter", "eraser"],
+  enableTwoFingerToolCycle: true,
+  enablePencilDoubleTapProbe: false,
+  penOnlyInk: true,
+  allowFingerDraw: false,
+  palmRejectMs: 700,
+  simulatePressureFallback: true,
+  pressureGain: 1.2,
+  pfSmoothing: 0.5,
+  pfThinning: 0.5,
+  pfStreamline: 0.5,
+  // Don't thrash disk while writing — 8s idle or exit
+  debounceMs: 8e3,
+  maxCanvasCssHeight: 8192,
+  undoLimit: 40,
+  toolbarXPct: 50,
+  toolbarYPct: 92
+};
+function sanitizeSettings(raw) {
+  const s2 = Object.assign({}, DEFAULT_SETTINGS, raw ?? {});
+  let folder = String(s2.annotationsFolder || "PyoInk").trim().replace(/\\/g, "/");
+  if (!folder || folder.includes("..") || folder.startsWith("/") || folder.includes(":")) {
+    folder = DEFAULT_SETTINGS.annotationsFolder;
+  }
+  s2.annotationsFolder = folder.replace(/\/+$/, "");
+  s2.penWidth = clamp(Number(s2.penWidth), 0.5, 40);
+  s2.highlighterWidth = clamp(Number(s2.highlighterWidth), 2, 80);
+  s2.pressureGain = clamp(Number(s2.pressureGain), 0.3, 3);
+  s2.pfSmoothing = clamp(Number(s2.pfSmoothing), 0, 0.95);
+  s2.pfThinning = clamp(Number(s2.pfThinning), -0.99, 0.99);
+  s2.pfStreamline = clamp(Number(s2.pfStreamline), 0, 0.99);
+  s2.debounceMs = clamp(Number(s2.debounceMs), 1e3, 6e4);
+  s2.maxCanvasCssHeight = clamp(Number(s2.maxCanvasCssHeight), 2048, 16384);
+  s2.undoLimit = clamp(Number(s2.undoLimit), 10, 200);
+  s2.palmRejectMs = clamp(Number(s2.palmRejectMs), 0, 3e3);
+  s2.toolbarXPct = clamp(Number(s2.toolbarXPct), 5, 95);
+  s2.toolbarYPct = clamp(Number(s2.toolbarYPct), 5, 95);
+  if (s2.penOnlyInk === void 0) s2.penOnlyInk = true;
+  if (s2.penOnlyInk) s2.allowFingerDraw = false;
+  if (!Array.isArray(s2.toolCycle) || s2.toolCycle.length === 0) {
+    s2.toolCycle = [...DEFAULT_SETTINGS.toolCycle];
+  }
+  return s2;
+}
+
 // src/view/PyoInkView.ts
 var VIEW_TYPE_PYOINK = "pyoink-view";
 var PyoInkView = class extends import_obsidian2.ItemView {
@@ -1043,6 +1085,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.cacheCanvas = null;
     this.cacheValid = false;
     this.navBtn = null;
+    this.dragBound = false;
     this.saveTimer = null;
     this.raf = 0;
     this.needRedraw = false;
@@ -1070,8 +1113,6 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     const container = this.containerEl.children[1];
     container.empty();
     this.rootEl = container.createDiv({ cls: "pyoink-root" });
-    this.driftEl = this.rootEl.createDiv({ cls: "pyoink-drift" });
-    this.statusEl = this.rootEl.createDiv({ cls: "pyoink-status", text: "PyoInk \xB7 ink layer" });
     this.scrollEl = this.rootEl.createDiv({ cls: "pyoink-scroll" });
     this.pageEl = this.scrollEl.createDiv({ cls: "pyoink-page" });
     this.noteEl = this.pageEl.createDiv({ cls: "pyoink-content" });
@@ -1126,11 +1167,9 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.cacheValid = false;
     await this.waitImages(2e3);
     this.resizeAndRedraw(true);
-    this.updateDriftBadge();
     this.watchFile(file);
     this.watchResize();
     this.state = this.state === "error" ? "error" : "ready";
-    this.statusEl.setText(`${file.path} \xB7 transparent ink layer`);
     this.rootEl.focus();
   }
   wireInternalLinks() {
@@ -1164,42 +1203,31 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   buildToolbar() {
     this.toolbarEl = this.rootEl.createDiv({ cls: "pyoink-toolbar" });
-    const mk = (tool, label) => {
-      const b2 = this.toolbarEl.createEl("button", { text: label });
-      b2.dataset.tool = tool;
-      b2.onclick = () => {
-        if (this.engine.isStroking()) return;
-        this.setTool(tool);
-        this.setNavigate(false);
-      };
-    };
-    mk("pen", "Pen");
-    mk("highlighter", "Hi");
-    mk("eraser", "Eraser");
-    this.navBtn = this.toolbarEl.createEl("button", { text: "Nav" });
-    this.navBtn.title = "Navigate mode \u2014 click links / select text under the ink layer";
+    this.applyToolbarPos();
+    const drag = this.toolbarEl.createDiv({ cls: "pyoink-tb-drag" });
+    this.bindToolbarDrag(drag);
+    const tools = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
+    this.iconBtn(tools, "pen", "pencil", "Pen");
+    this.iconBtn(tools, "highlighter", "highlighter", "Highlighter");
+    this.iconBtn(tools, "eraser", "eraser", "Eraser");
+    this.navBtn = tools.createEl("button");
+    this.navBtn.title = "Navigate (links)";
+    (0, import_obsidian2.setIcon)(this.navBtn, "mouse-pointer-click");
     this.navBtn.onclick = () => this.setNavigate(!this.gestures.navigateMode);
-    const cycle = this.toolbarEl.createEl("button", { text: "Cycle" });
-    cycle.onclick = () => this.cycleTool();
-    const undo = this.toolbarEl.createEl("button", { text: "Undo" });
+    const undo = tools.createEl("button");
+    undo.title = "Undo";
+    (0, import_obsidian2.setIcon)(undo, "undo-2");
     undo.onclick = () => {
+      this.finishStrokeIfNeeded();
       if (this.engine.undo()) {
         this.cacheValid = false;
         this.markDirty();
         this.requestRedraw();
       }
     };
-    const redo = this.toolbarEl.createEl("button", { text: "Redo" });
-    redo.onclick = () => {
-      if (this.engine.redo()) {
-        this.cacheValid = false;
-        this.markDirty();
-        this.requestRedraw();
-      }
-    };
-    const save = this.toolbarEl.createEl("button", { text: "Save" });
-    save.onclick = () => void this.flushSave();
-    const exit = this.toolbarEl.createEl("button", { text: "Exit" });
+    const exit = tools.createEl("button");
+    exit.title = "Save & exit";
+    (0, import_obsidian2.setIcon)(exit, "check");
     exit.onclick = async () => {
       const ok = await this.flushSave();
       if (!ok && this.dirty) {
@@ -1207,36 +1235,136 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       }
       if (this.file) await this.leaf.openFile(this.file);
     };
+    this.colorRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
+    this.rebuildColorRow();
+    const widths = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
+    for (const [label, penW, hiW] of [
+      ["S", 1.6, 10],
+      ["M", 2.4, 16],
+      ["L", 4, 24]
+    ]) {
+      const b2 = widths.createEl("button", { text: label, cls: "pyoink-width-btn" });
+      b2.dataset.w = label;
+      b2.onclick = () => {
+        this.plugin.settings.penWidth = penW;
+        this.plugin.settings.highlighterWidth = hiW;
+        void this.plugin.saveSettings();
+        this.syncToolbar();
+      };
+    }
     this.syncToolbar();
+  }
+  iconBtn(parent, tool, icon, title) {
+    const b2 = parent.createEl("button");
+    b2.dataset.tool = tool;
+    b2.title = title;
+    (0, import_obsidian2.setIcon)(b2, icon);
+    b2.onclick = () => {
+      this.finishStrokeIfNeeded();
+      this.setTool(tool);
+      this.setNavigate(false);
+      this.rebuildColorRow();
+      this.syncToolbar();
+    };
+  }
+  rebuildColorRow() {
+    this.colorRowEl.empty();
+    const tool = this.gestures.getTool();
+    if (tool === "eraser") {
+      this.colorRowEl.style.display = "none";
+      return;
+    }
+    this.colorRowEl.style.display = "";
+    const colors = tool === "highlighter" ? HI_COLORS : PEN_COLORS;
+    const cur = tool === "highlighter" ? this.plugin.settings.highlighterColor : this.plugin.settings.penColor;
+    for (const c2 of colors) {
+      const b2 = this.colorRowEl.createEl("button", { cls: "pyoink-swatch" });
+      b2.style.background = c2;
+      b2.title = c2;
+      if (c2.toLowerCase() === cur.toLowerCase()) b2.classList.add("is-active");
+      b2.onclick = () => {
+        this.finishStrokeIfNeeded();
+        if (tool === "highlighter") this.plugin.settings.highlighterColor = c2;
+        else this.plugin.settings.penColor = c2;
+        void this.plugin.saveSettings();
+        this.rebuildColorRow();
+      };
+    }
+  }
+  finishStrokeIfNeeded() {
+    if (!this.engine.isStroking()) return;
+    const changed = this.engine.end();
+    this.gestures.clearActiveDraw();
+    this.state = "ready";
+    this.cacheValid = false;
+    if (changed) this.markDirty();
+    this.requestRedraw();
+  }
+  applyToolbarPos() {
+    const x2 = this.plugin.settings.toolbarXPct ?? 50;
+    const y2 = this.plugin.settings.toolbarYPct ?? 92;
+    this.toolbarEl.style.left = `${x2}%`;
+    this.toolbarEl.style.top = `${y2}%`;
+    this.toolbarEl.style.bottom = "auto";
+    this.toolbarEl.style.transform = "translate(-50%, -50%)";
+  }
+  bindToolbarDrag(handle) {
+    let dragging = false;
+    let pid = null;
+    const onDown = (ev) => {
+      dragging = true;
+      pid = ev.pointerId;
+      this.dragBound = true;
+      this.toolbarEl.classList.add("is-dragging");
+      handle.setPointerCapture(ev.pointerId);
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+    const onMove = (ev) => {
+      if (!dragging || ev.pointerId !== pid) return;
+      const rect = this.rootEl.getBoundingClientRect();
+      const x2 = (ev.clientX - rect.left) / rect.width * 100;
+      const y2 = (ev.clientY - rect.top) / rect.height * 100;
+      this.plugin.settings.toolbarXPct = Math.min(95, Math.max(5, x2));
+      this.plugin.settings.toolbarYPct = Math.min(95, Math.max(5, y2));
+      this.applyToolbarPos();
+      ev.preventDefault();
+    };
+    const onUp = (ev) => {
+      if (!dragging || ev.pointerId !== pid) return;
+      dragging = false;
+      pid = null;
+      this.dragBound = false;
+      this.toolbarEl.classList.remove("is-dragging");
+      void this.plugin.saveSettings();
+      try {
+        handle.releasePointerCapture(ev.pointerId);
+      } catch {
+      }
+    };
+    handle.addEventListener("pointerdown", onDown);
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
   }
   setNavigate(on) {
     this.gestures.navigateMode = on;
     this.pageEl.classList.toggle("is-navigate", on);
     this.canvas.classList.toggle("is-pass-through", on);
     this.syncToolbar();
-    this.statusEl.setText(
-      on ? `${this.file?.path ?? ""} \xB7 NAV (links clickable)` : `${this.file?.path ?? ""} \xB7 INK (transparent layer)`
-    );
   }
   setTool(t2) {
     this.gestures.setTool(t2);
     this.syncToolbar();
-    if (!this.gestures.navigateMode) {
-      this.statusEl.setText(`${this.file?.path ?? ""} \xB7 ${t2}`);
-    }
   }
   cycleTool() {
-    if (this.engine.isStroking()) {
-      new import_obsidian2.Notice("PyoInk: finish stroke before switching tool");
-      return;
-    }
+    this.finishStrokeIfNeeded();
     this.setNavigate(false);
     const order = this.plugin.settings.toolCycle;
     const cur = this.gestures.getTool();
     const i2 = order.indexOf(cur);
-    const next = order[(i2 + 1) % order.length];
-    this.setTool(next);
-    new import_obsidian2.Notice(`Tool: ${next}`);
+    this.setTool(order[(i2 + 1) % order.length]);
+    this.rebuildColorRow();
   }
   syncToolbar() {
     const t2 = this.gestures.getTool();
@@ -1247,6 +1375,13 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       );
     });
     if (this.navBtn) this.navBtn.classList.toggle("is-active", this.gestures.navigateMode);
+    const pw = this.plugin.settings.penWidth;
+    this.toolbarEl.querySelectorAll("button[data-w]").forEach((el) => {
+      const b2 = el;
+      const lab = b2.dataset.w;
+      const active = lab === "S" && pw <= 2 || lab === "M" && pw > 2 && pw < 3.5 || lab === "L" && pw >= 3.5;
+      b2.classList.toggle("is-active", active);
+    });
   }
   bindKeys() {
     this.rootEl.tabIndex = 0;
@@ -1380,6 +1515,10 @@ var PyoInkView = class extends import_obsidian2.ItemView {
           inkLog("E_PTR_NO_CAPTURE");
         }
         this.state = "stroking";
+        if (this.saveTimer) {
+          window.clearTimeout(this.saveTimer);
+          this.saveTimer = null;
+        }
         const sample = this.gestures.sampleFromEvent(ev, rect);
         if (action.type === "erase-start" || this.gestures.getTool() === "eraser") {
           this.engine.beginErase();
@@ -1456,12 +1595,19 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   markDirty() {
     this.dirty = true;
+    if (this.engine.isStroking() || this.state === "stroking") return;
     this.scheduleSave();
   }
   scheduleSave() {
-    const ms = this.plugin.settings.debounceMs;
+    const ms = Math.max(3e3, this.plugin.settings.debounceMs || 8e3);
     if (this.saveTimer) window.clearTimeout(this.saveTimer);
-    this.saveTimer = window.setTimeout(() => void this.flushSave(), ms);
+    this.saveTimer = window.setTimeout(() => {
+      if (this.engine.isStroking() || this.state === "stroking") {
+        this.scheduleSave();
+        return;
+      }
+      void this.flushSave();
+    }, ms);
   }
   async flushSave() {
     if (!this.file) return true;
@@ -1496,7 +1642,6 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     if (ok) {
       this.dirty = false;
       this.remoteNewer = false;
-      this.statusEl.setText(`${this.file.path} \xB7 saved`);
     }
     if (this.store.consumePending()) return this.flushSave();
     this.state = "ready";
@@ -1527,14 +1672,12 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         }
         if (f2.stat.mtime > this.store.getLoadedMtime()) void this.reloadFromDisk();
       }
-      if (f2.path === file.path) this.updateDriftBadge();
     });
     this.unsubModify = () => this.app.vault.offref(ref);
   }
   watchResize() {
     this.resizeObs = new ResizeObserver(() => {
       this.resizeAndRedraw(false);
-      this.updateDriftBadge();
     });
     this.resizeObs.observe(this.pageEl);
   }
@@ -1547,30 +1690,6 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       this.resizeObs.disconnect();
       this.resizeObs = null;
     }
-  }
-  updateDriftBadge() {
-    if (!this.file) {
-      this.driftEl.setText("");
-      return;
-    }
-    const live = measureLayout(
-      this.pageEl,
-      this.file.stat.mtime,
-      this.file.stat.size,
-      this.plugin.settings.maxCanvasCssHeight
-    );
-    const saved = {
-      cssWidth: this.doc.layout.cssWidth,
-      contentHeight: this.doc.layout.contentHeight,
-      dpr: this.doc.layout.dpr,
-      sourceMtime: this.doc.sourceMtime,
-      sourceSize: this.doc.sourceSize,
-      snapshotAt: this.doc.layout.snapshotAt
-    };
-    const level = detectDrift(saved, live, true);
-    this.driftEl.setText(driftLabel(level));
-    this.driftEl.className = `pyoink-drift is-${level}`;
-    if (level === "hard") inkLog("E_DRIFT", level);
   }
   resizeAndRedraw(forceCache) {
     if (!this.file) return;
@@ -1623,53 +1742,6 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
 };
 
-// src/util/settings.ts
-var DEFAULT_SETTINGS = {
-  annotationsFolder: "PyoInk",
-  penColor: "#1a1a1a",
-  highlighterColor: "#ffe566",
-  penWidth: 2.2,
-  highlighterWidth: 14,
-  toolCycle: ["pen", "highlighter", "eraser"],
-  enableTwoFingerToolCycle: true,
-  enablePencilDoubleTapProbe: false,
-  penOnlyInk: true,
-  allowFingerDraw: false,
-  palmRejectMs: 700,
-  simulatePressureFallback: true,
-  pressureGain: 1.2,
-  pfSmoothing: 0.5,
-  pfThinning: 0.5,
-  pfStreamline: 0.5,
-  debounceMs: 400,
-  maxCanvasCssHeight: 8192,
-  undoLimit: 80
-};
-function sanitizeSettings(raw) {
-  const s2 = Object.assign({}, DEFAULT_SETTINGS, raw ?? {});
-  let folder = String(s2.annotationsFolder || "PyoInk").trim().replace(/\\/g, "/");
-  if (!folder || folder.includes("..") || folder.startsWith("/") || folder.includes(":")) {
-    folder = DEFAULT_SETTINGS.annotationsFolder;
-  }
-  s2.annotationsFolder = folder.replace(/\/+$/, "");
-  s2.penWidth = clamp(Number(s2.penWidth), 0.5, 40);
-  s2.highlighterWidth = clamp(Number(s2.highlighterWidth), 2, 80);
-  s2.pressureGain = clamp(Number(s2.pressureGain), 0.3, 3);
-  s2.pfSmoothing = clamp(Number(s2.pfSmoothing), 0, 0.95);
-  s2.pfThinning = clamp(Number(s2.pfThinning), -0.99, 0.99);
-  s2.pfStreamline = clamp(Number(s2.pfStreamline), 0, 0.99);
-  s2.debounceMs = clamp(Number(s2.debounceMs), 100, 2e3);
-  s2.maxCanvasCssHeight = clamp(Number(s2.maxCanvasCssHeight), 2048, 16384);
-  s2.undoLimit = clamp(Number(s2.undoLimit), 10, 200);
-  s2.palmRejectMs = clamp(Number(s2.palmRejectMs), 0, 3e3);
-  if (s2.penOnlyInk === void 0) s2.penOnlyInk = true;
-  if (s2.penOnlyInk) s2.allowFingerDraw = false;
-  if (!Array.isArray(s2.toolCycle) || s2.toolCycle.length === 0) {
-    s2.toolCycle = [...DEFAULT_SETTINGS.toolCycle];
-  }
-  return s2;
-}
-
 // main.ts
 var PyoInkPlugin = class extends import_obsidian3.Plugin {
   constructor() {
@@ -1687,24 +1759,6 @@ var PyoInkPlugin = class extends import_obsidian3.Plugin {
         if (!file || file.extension !== "md") return false;
         if (!checking) void this.openInk(file);
         return true;
-      }
-    });
-    this.addCommand({
-      id: "pyoink-cycle-tool",
-      name: "PyoInk: cycle tool",
-      callback: () => {
-        const v2 = this.getActiveInkView();
-        if (v2) v2.cycleTool();
-        else new import_obsidian3.Notice("Open PyoInk view first");
-      }
-    });
-    this.addCommand({
-      id: "pyoink-force-save",
-      name: "PyoInk: force save",
-      callback: () => {
-        const v2 = this.getActiveInkView();
-        if (v2) void v2.flushSave();
-        else new import_obsidian3.Notice("Open PyoInk view first");
       }
     });
     this.addRibbonIcon("pen-tool", "PyoInk", async () => {
@@ -1746,78 +1800,27 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "PyoInk" });
     containerEl.createEl("p", {
-      text: "GoodNotes-feel overlay on Markdown. Source notes are never modified. Pencil double-tap is best-effort (often unavailable on iPad WebView)."
+      text: "Transparent ink on Markdown. Pen-only by default. Saves only after idle / exit (not every stroke)."
     });
-    new import_obsidian3.Setting(containerEl).setName("Annotations folder").setDesc("Vault-relative. LiveSync-friendly. Not under .obsidian/plugins.").addText(
+    new import_obsidian3.Setting(containerEl).setName("Pen-only ink").setDesc("Only Apple Pencil draws. Finger scrolls.").addToggle(
+      (t2) => t2.setValue(this.plugin.settings.penOnlyInk !== false).onChange(async (v2) => {
+        this.plugin.settings.penOnlyInk = v2;
+        if (v2) this.plugin.settings.allowFingerDraw = false;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Idle save delay (ms)").setDesc("Higher = less lag while writing. Always saves on exit.").addSlider(
+      (s2) => s2.setLimits(2e3, 2e4, 500).setValue(this.plugin.settings.debounceMs).setDynamicTooltip().onChange(async (v2) => {
+        this.plugin.settings.debounceMs = v2;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Annotations folder").addText(
       (t2) => t2.setValue(this.plugin.settings.annotationsFolder).onChange(async (v2) => {
         this.plugin.settings = sanitizeSettings({
           ...this.plugin.settings,
           annotationsFolder: v2
         });
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Two-finger tap cycles tool").setDesc("On the transparent ink layer: short two-finger tap cycles Pen/Hi/Eraser.").addToggle(
-      (t2) => t2.setValue(this.plugin.settings.enableTwoFingerToolCycle).onChange(async (v2) => {
-        this.plugin.settings.enableTwoFingerToolCycle = v2;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Probe Pencil double-tap (experimental)").setDesc("Often unavailable in Obsidian iPad WebView. Prefer Cycle / two-finger / N=Nav.").addToggle(
-      (t2) => t2.setValue(this.plugin.settings.enablePencilDoubleTapProbe).onChange(async (v2) => {
-        this.plugin.settings.enablePencilDoubleTapProbe = v2;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Pen-only ink (recommended)").setDesc(
-      "ON: only Apple Pencil / stylus draws. Finger/hand never inks \u2014 scroll or two-finger Cycle only. While pen is down, palm is ignored."
-    ).addToggle(
-      (t2) => t2.setValue(this.plugin.settings.penOnlyInk !== false).onChange(async (v2) => {
-        this.plugin.settings.penOnlyInk = v2;
-        if (v2) this.plugin.settings.allowFingerDraw = false;
-        await this.plugin.saveSettings();
-        this.display();
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Allow finger draw").setDesc("Only if Pen-only ink is OFF. Still blocked while Pencil was recently used (palm).").addToggle(
-      (t2) => t2.setValue(this.plugin.settings.allowFingerDraw).setDisabled(this.plugin.settings.penOnlyInk !== false).onChange(async (v2) => {
-        this.plugin.settings.allowFingerDraw = v2;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Palm reject after pen (ms)").setDesc("After Pencil lifts, ignore hand as ink for this long.").addSlider(
-      (s2) => s2.setLimits(0, 2e3, 50).setValue(this.plugin.settings.palmRejectMs ?? 700).setDynamicTooltip().onChange(async (v2) => {
-        this.plugin.settings.palmRejectMs = v2;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Pen color").addText(
-      (t2) => t2.setValue(this.plugin.settings.penColor).onChange(async (v2) => {
-        this.plugin.settings.penColor = v2 || "#1a1a1a";
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Highlighter color").addText(
-      (t2) => t2.setValue(this.plugin.settings.highlighterColor).onChange(async (v2) => {
-        this.plugin.settings.highlighterColor = v2 || "#ffe566";
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Pressure gain").addSlider(
-      (s2) => s2.setLimits(0.3, 3, 0.05).setValue(this.plugin.settings.pressureGain).setDynamicTooltip().onChange(async (v2) => {
-        this.plugin.settings.pressureGain = v2;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("perfect-freehand smoothing").addSlider(
-      (s2) => s2.setLimits(0, 0.9, 0.05).setValue(this.plugin.settings.pfSmoothing).setDynamicTooltip().onChange(async (v2) => {
-        this.plugin.settings.pfSmoothing = v2;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Pen width").addSlider(
-      (s2) => s2.setLimits(0.5, 20, 0.1).setValue(this.plugin.settings.penWidth).setDynamicTooltip().onChange(async (v2) => {
-        this.plugin.settings.penWidth = v2;
         await this.plugin.saveSettings();
       })
     );

@@ -1,4 +1,4 @@
-/* PyoInk — transparent ink layer over Markdown */
+/* PyoInk — minimal transparent ink layer */
 .pyoink-root {
   position: relative;
   width: 100%;
@@ -6,6 +6,7 @@
   overflow: hidden;
   background: var(--background-primary);
   outline: none;
+  touch-action: none;
 }
 
 .pyoink-scroll {
@@ -17,7 +18,6 @@
   -webkit-overflow-scrolling: touch;
 }
 
-/* Page stacks MD + transparent canvas (same coordinate space, scroll together) */
 .pyoink-page {
   position: relative;
   margin: 0 auto;
@@ -27,10 +27,9 @@
 .pyoink-content {
   position: relative;
   z-index: 1;
-  padding: 1.5rem 2rem 6rem;
+  padding: 1.5rem 2rem 7rem;
   max-width: var(--file-line-width, 700px);
   margin: 0 auto;
-  /* content is visible under ink; default no hit so pen goes to canvas */
   pointer-events: none;
   background: transparent;
 }
@@ -43,7 +42,6 @@
   cursor: pointer;
 }
 
-/* Transparent ink overlay — sits ON TOP of markdown */
 .pyoink-canvas {
   position: absolute;
   left: 0;
@@ -52,42 +50,87 @@
   touch-action: none;
   pointer-events: auto;
   background: transparent;
-  /* no fill — ink only */
 }
 
 .pyoink-canvas.is-pass-through {
   pointer-events: none;
 }
 
+/* Floating draggable remote */
 .pyoink-toolbar {
   position: absolute;
+  z-index: 40;
   left: 50%;
-  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
-  transform: translateX(-50%);
-  z-index: 30;
+  top: 92%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--background-secondary) 94%, transparent);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22);
+  backdrop-filter: blur(10px);
+  pointer-events: auto;
+  max-width: min(96vw, 420px);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pyoink-toolbar.is-dragging {
+  opacity: 0.92;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.3);
+}
+
+.pyoink-tb-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  max-width: 96%;
+  align-items: center;
   justify-content: center;
-  padding: 8px 10px;
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--background-secondary) 92%, transparent);
-  border: 1px solid var(--background-modifier-border);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.18);
-  backdrop-filter: blur(8px);
-  pointer-events: auto;
+  gap: 4px;
+}
+
+.pyoink-tb-drag {
+  cursor: grab;
+  width: 100%;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.55;
+  margin: -2px 0 2px;
+}
+
+.pyoink-tb-drag:active {
+  cursor: grabbing;
+}
+
+.pyoink-tb-drag::before {
+  content: "";
+  width: 36px;
+  height: 4px;
+  border-radius: 99px;
+  background: var(--text-muted);
 }
 
 .pyoink-toolbar button {
+  width: 40px;
+  height: 40px;
   min-width: 40px;
-  height: 36px;
-  border-radius: 10px;
+  padding: 0;
+  border-radius: 12px;
   border: none;
   background: transparent;
   color: var(--text-normal);
-  font-size: 12px;
-  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pyoink-toolbar button svg {
+  width: 20px;
+  height: 20px;
 }
 
 .pyoink-toolbar button.is-active {
@@ -95,35 +138,30 @@
   color: var(--text-on-accent);
 }
 
-.pyoink-status {
-  position: absolute;
-  top: 8px;
-  right: 10px;
-  z-index: 30;
-  font-size: 11px;
-  opacity: 0.75;
-  max-width: 55%;
-  text-align: right;
-  pointer-events: none;
+.pyoink-swatch {
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
+  border-radius: 999px !important;
+  border: 2px solid transparent !important;
+  padding: 0 !important;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15);
 }
 
-.pyoink-drift {
-  position: absolute;
-  top: 8px;
-  left: 10px;
-  z-index: 30;
-  font-size: 11px;
-  font-weight: 600;
-  pointer-events: none;
-  max-width: 40%;
+.pyoink-swatch.is-active {
+  border-color: var(--text-normal) !important;
+  box-shadow: 0 0 0 2px var(--interactive-accent);
+  background: inherit !important;
+  color: inherit !important;
 }
 
-.pyoink-drift.is-soft {
-  color: #c9a227;
+.pyoink-width-btn {
+  width: 36px !important;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
 }
-.pyoink-drift.is-hard {
-  color: #d9480f;
-}
-.pyoink-drift.is-broken {
-  color: var(--text-error);
+
+.pyoink-width-btn.is-active {
+  color: var(--text-on-accent);
 }

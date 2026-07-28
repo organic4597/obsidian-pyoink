@@ -4,14 +4,16 @@ import {
   Notice,
   TFile,
   WorkspaceLeaf,
+  setIcon,
 } from "obsidian";
 import type PyoInkPlugin from "../../main";
 import { StrokeEngine } from "../engine/StrokeEngine";
 import { GestureRouter } from "../input/GestureRouter";
-import { detectDrift, driftLabel, measureLayout, type DriftLevel } from "../layout/LayoutSnapshot";
+import { measureLayout } from "../layout/LayoutSnapshot";
 import { emptyDoc, type InkDocV1 } from "../store/schema";
 import { InkStore } from "../store/InkStore";
 import type { InkTool } from "../util/settings";
+import { HI_COLORS, PEN_COLORS } from "../util/settings";
 import { inkLog } from "../util/errors";
 
 export const VIEW_TYPE_PYOINK = "pyoink-view";
@@ -46,9 +48,9 @@ export class PyoInkView extends ItemView {
   private cacheCanvas: HTMLCanvasElement | null = null;
   private cacheValid = false;
   private toolbarEl!: HTMLElement;
-  private statusEl!: HTMLElement;
-  private driftEl!: HTMLElement;
+  private colorRowEl!: HTMLElement;
   private navBtn: HTMLButtonElement | null = null;
+  private dragBound = false;
 
   private saveTimer: number | null = null;
   private raf = 0;
@@ -87,8 +89,6 @@ export class PyoInkView extends ItemView {
     const container = this.containerEl.children[1] as HTMLElement;
     container.empty();
     this.rootEl = container.createDiv({ cls: "pyoink-root" });
-    this.driftEl = this.rootEl.createDiv({ cls: "pyoink-drift" });
-    this.statusEl = this.rootEl.createDiv({ cls: "pyoink-status", text: "PyoInk · ink layer" });
     this.scrollEl = this.rootEl.createDiv({ cls: "pyoink-scroll" });
     // page = content + transparent canvas stacked
     this.pageEl = this.scrollEl.createDiv({ cls: "pyoink-page" });
@@ -150,11 +150,9 @@ export class PyoInkView extends ItemView {
 
     await this.waitImages(2000);
     this.resizeAndRedraw(true);
-    this.updateDriftBadge();
     this.watchFile(file);
     this.watchResize();
     this.state = this.state === "error" ? "error" : "ready";
-    this.statusEl.setText(`${file.path} · transparent ink layer`);
     this.rootEl.focus();
   }
 
@@ -192,45 +190,38 @@ export class PyoInkView extends ItemView {
 
   private buildToolbar() {
     this.toolbarEl = this.rootEl.createDiv({ cls: "pyoink-toolbar" });
-    const mk = (tool: InkTool, label: string) => {
-      const b = this.toolbarEl.createEl("button", { text: label });
-      b.dataset.tool = tool;
-      b.onclick = () => {
-        if (this.engine.isStroking()) return;
-        this.setTool(tool);
-        this.setNavigate(false);
-      };
-    };
-    mk("pen", "Pen");
-    mk("highlighter", "Hi");
-    mk("eraser", "Eraser");
+    this.applyToolbarPos();
 
-    this.navBtn = this.toolbarEl.createEl("button", { text: "Nav" });
-    this.navBtn.title = "Navigate mode — click links / select text under the ink layer";
+    // Drag handle
+    const drag = this.toolbarEl.createDiv({ cls: "pyoink-tb-drag" });
+    this.bindToolbarDrag(drag);
+
+    // Tools row
+    const tools = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
+    this.iconBtn(tools, "pen", "pencil", "Pen");
+    this.iconBtn(tools, "highlighter", "highlighter", "Highlighter");
+    this.iconBtn(tools, "eraser", "eraser", "Eraser");
+
+    this.navBtn = tools.createEl("button");
+    this.navBtn.title = "Navigate (links)";
+    setIcon(this.navBtn, "mouse-pointer-click");
     this.navBtn.onclick = () => this.setNavigate(!this.gestures.navigateMode);
 
-    const cycle = this.toolbarEl.createEl("button", { text: "Cycle" });
-    cycle.onclick = () => this.cycleTool();
-
-    const undo = this.toolbarEl.createEl("button", { text: "Undo" });
+    const undo = tools.createEl("button");
+    undo.title = "Undo";
+    setIcon(undo, "undo-2");
     undo.onclick = () => {
+      this.finishStrokeIfNeeded();
       if (this.engine.undo()) {
         this.cacheValid = false;
         this.markDirty();
         this.requestRedraw();
       }
     };
-    const redo = this.toolbarEl.createEl("button", { text: "Redo" });
-    redo.onclick = () => {
-      if (this.engine.redo()) {
-        this.cacheValid = false;
-        this.markDirty();
-        this.requestRedraw();
-      }
-    };
-    const save = this.toolbarEl.createEl("button", { text: "Save" });
-    save.onclick = () => void this.flushSave();
-    const exit = this.toolbarEl.createEl("button", { text: "Exit" });
+
+    const exit = tools.createEl("button");
+    exit.title = "Save & exit";
+    setIcon(exit, "check");
     exit.onclick = async () => {
       const ok = await this.flushSave();
       if (!ok && this.dirty) {
@@ -238,7 +229,132 @@ export class PyoInkView extends ItemView {
       }
       if (this.file) await this.leaf.openFile(this.file);
     };
+
+    // Color row — always available (including between strokes)
+    this.colorRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
+    this.rebuildColorRow();
+
+    // Width row
+    const widths = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
+    for (const [label, penW, hiW] of [
+      ["S", 1.6, 10],
+      ["M", 2.4, 16],
+      ["L", 4.0, 24],
+    ] as const) {
+      const b = widths.createEl("button", { text: label, cls: "pyoink-width-btn" });
+      b.dataset.w = label;
+      b.onclick = () => {
+        this.plugin.settings.penWidth = penW;
+        this.plugin.settings.highlighterWidth = hiW;
+        void this.plugin.saveSettings();
+        this.syncToolbar();
+      };
+    }
+
     this.syncToolbar();
+  }
+
+  private iconBtn(parent: HTMLElement, tool: InkTool, icon: string, title: string) {
+    const b = parent.createEl("button");
+    b.dataset.tool = tool;
+    b.title = title;
+    setIcon(b, icon);
+    b.onclick = () => {
+      // Color/tool change allowed anytime — end active stroke first
+      this.finishStrokeIfNeeded();
+      this.setTool(tool);
+      this.setNavigate(false);
+      this.rebuildColorRow();
+      this.syncToolbar();
+    };
+  }
+
+  private rebuildColorRow() {
+    this.colorRowEl.empty();
+    const tool = this.gestures.getTool();
+    if (tool === "eraser") {
+      this.colorRowEl.style.display = "none";
+      return;
+    }
+    this.colorRowEl.style.display = "";
+    const colors = tool === "highlighter" ? HI_COLORS : PEN_COLORS;
+    const cur =
+      tool === "highlighter"
+        ? this.plugin.settings.highlighterColor
+        : this.plugin.settings.penColor;
+    for (const c of colors) {
+      const b = this.colorRowEl.createEl("button", { cls: "pyoink-swatch" });
+      b.style.background = c;
+      b.title = c;
+      if (c.toLowerCase() === cur.toLowerCase()) b.classList.add("is-active");
+      b.onclick = () => {
+        this.finishStrokeIfNeeded();
+        if (tool === "highlighter") this.plugin.settings.highlighterColor = c;
+        else this.plugin.settings.penColor = c;
+        void this.plugin.saveSettings();
+        this.rebuildColorRow();
+      };
+    }
+  }
+
+  private finishStrokeIfNeeded() {
+    if (!this.engine.isStroking()) return;
+    const changed = this.engine.end();
+    this.gestures.clearActiveDraw();
+    this.state = "ready";
+    this.cacheValid = false;
+    if (changed) this.markDirty();
+    this.requestRedraw();
+  }
+
+  private applyToolbarPos() {
+    const x = this.plugin.settings.toolbarXPct ?? 50;
+    const y = this.plugin.settings.toolbarYPct ?? 92;
+    this.toolbarEl.style.left = `${x}%`;
+    this.toolbarEl.style.top = `${y}%`;
+    this.toolbarEl.style.bottom = "auto";
+    this.toolbarEl.style.transform = "translate(-50%, -50%)";
+  }
+
+  private bindToolbarDrag(handle: HTMLElement) {
+    let dragging = false;
+    let pid: number | null = null;
+    const onDown = (ev: PointerEvent) => {
+      dragging = true;
+      pid = ev.pointerId;
+      this.dragBound = true;
+      this.toolbarEl.classList.add("is-dragging");
+      handle.setPointerCapture(ev.pointerId);
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (!dragging || ev.pointerId !== pid) return;
+      const rect = this.rootEl.getBoundingClientRect();
+      const x = ((ev.clientX - rect.left) / rect.width) * 100;
+      const y = ((ev.clientY - rect.top) / rect.height) * 100;
+      this.plugin.settings.toolbarXPct = Math.min(95, Math.max(5, x));
+      this.plugin.settings.toolbarYPct = Math.min(95, Math.max(5, y));
+      this.applyToolbarPos();
+      ev.preventDefault();
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (!dragging || ev.pointerId !== pid) return;
+      dragging = false;
+      pid = null;
+      this.dragBound = false;
+      this.toolbarEl.classList.remove("is-dragging");
+      void this.plugin.saveSettings();
+      try {
+        handle.releasePointerCapture(ev.pointerId);
+      } catch {
+        /* */
+      }
+    };
+    handle.addEventListener("pointerdown", onDown);
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
   }
 
   setNavigate(on: boolean) {
@@ -246,33 +362,21 @@ export class PyoInkView extends ItemView {
     this.pageEl.classList.toggle("is-navigate", on);
     this.canvas.classList.toggle("is-pass-through", on);
     this.syncToolbar();
-    this.statusEl.setText(
-      on
-        ? `${this.file?.path ?? ""} · NAV (links clickable)`
-        : `${this.file?.path ?? ""} · INK (transparent layer)`,
-    );
   }
 
   setTool(t: InkTool) {
     this.gestures.setTool(t);
     this.syncToolbar();
-    if (!this.gestures.navigateMode) {
-      this.statusEl.setText(`${this.file?.path ?? ""} · ${t}`);
-    }
   }
 
   cycleTool() {
-    if (this.engine.isStroking()) {
-      new Notice("PyoInk: finish stroke before switching tool");
-      return;
-    }
+    this.finishStrokeIfNeeded();
     this.setNavigate(false);
     const order = this.plugin.settings.toolCycle;
     const cur = this.gestures.getTool();
     const i = order.indexOf(cur);
-    const next = order[(i + 1) % order.length];
-    this.setTool(next);
-    new Notice(`Tool: ${next}`);
+    this.setTool(order[(i + 1) % order.length]);
+    this.rebuildColorRow();
   }
 
   private syncToolbar() {
@@ -284,6 +388,14 @@ export class PyoInkView extends ItemView {
       );
     });
     if (this.navBtn) this.navBtn.classList.toggle("is-active", this.gestures.navigateMode);
+    const pw = this.plugin.settings.penWidth;
+    this.toolbarEl.querySelectorAll("button[data-w]").forEach((el) => {
+      const b = el as HTMLButtonElement;
+      const lab = b.dataset.w;
+      const active =
+        (lab === "S" && pw <= 2) || (lab === "M" && pw > 2 && pw < 3.5) || (lab === "L" && pw >= 3.5);
+      b.classList.toggle("is-active", active);
+    });
   }
 
   private bindKeys() {
@@ -436,6 +548,11 @@ export class PyoInkView extends ItemView {
           inkLog("E_PTR_NO_CAPTURE");
         }
         this.state = "stroking";
+        // Cancel pending disk write so pen stroke never waits on vault I/O
+        if (this.saveTimer) {
+          window.clearTimeout(this.saveTimer);
+          this.saveTimer = null;
+        }
         const sample = this.gestures.sampleFromEvent(ev, rect);
         if (action.type === "erase-start" || this.gestures.getTool() === "eraser") {
           this.engine.beginErase();
@@ -521,13 +638,22 @@ export class PyoInkView extends ItemView {
 
   private markDirty() {
     this.dirty = true;
+    // Never hit disk mid-stroke; only after idle
+    if (this.engine.isStroking() || this.state === "stroking") return;
     this.scheduleSave();
   }
 
   private scheduleSave() {
-    const ms = this.plugin.settings.debounceMs;
+    const ms = Math.max(3000, this.plugin.settings.debounceMs || 8000);
     if (this.saveTimer) window.clearTimeout(this.saveTimer);
-    this.saveTimer = window.setTimeout(() => void this.flushSave(), ms);
+    this.saveTimer = window.setTimeout(() => {
+      if (this.engine.isStroking() || this.state === "stroking") {
+        // still writing — push further
+        this.scheduleSave();
+        return;
+      }
+      void this.flushSave();
+    }, ms);
   }
 
   async flushSave(): Promise<boolean> {
@@ -563,7 +689,6 @@ export class PyoInkView extends ItemView {
     if (ok) {
       this.dirty = false;
       this.remoteNewer = false;
-      this.statusEl.setText(`${this.file.path} · saved`);
     }
     if (this.store.consumePending()) return this.flushSave();
     this.state = "ready";
@@ -596,7 +721,7 @@ export class PyoInkView extends ItemView {
         }
         if (f.stat.mtime > this.store.getLoadedMtime()) void this.reloadFromDisk();
       }
-      if (f.path === file.path) this.updateDriftBadge();
+      // note body edits ignored for badge (simplified UI)
     });
     this.unsubModify = () => this.app.vault.offref(ref);
   }
@@ -604,7 +729,6 @@ export class PyoInkView extends ItemView {
   private watchResize() {
     this.resizeObs = new ResizeObserver(() => {
       this.resizeAndRedraw(false);
-      this.updateDriftBadge();
     });
     this.resizeObs.observe(this.pageEl);
   }
@@ -618,31 +742,6 @@ export class PyoInkView extends ItemView {
       this.resizeObs.disconnect();
       this.resizeObs = null;
     }
-  }
-
-  private updateDriftBadge() {
-    if (!this.file) {
-      this.driftEl.setText("");
-      return;
-    }
-    const live = measureLayout(
-      this.pageEl,
-      this.file.stat.mtime,
-      this.file.stat.size,
-      this.plugin.settings.maxCanvasCssHeight,
-    );
-    const saved = {
-      cssWidth: this.doc.layout.cssWidth,
-      contentHeight: this.doc.layout.contentHeight,
-      dpr: this.doc.layout.dpr,
-      sourceMtime: this.doc.sourceMtime,
-      sourceSize: this.doc.sourceSize,
-      snapshotAt: this.doc.layout.snapshotAt,
-    };
-    const level: DriftLevel = detectDrift(saved, live, true);
-    this.driftEl.setText(driftLabel(level));
-    this.driftEl.className = `pyoink-drift is-${level}`;
-    if (level === "hard") inkLog("E_DRIFT", level);
   }
 
   private resizeAndRedraw(forceCache: boolean) {

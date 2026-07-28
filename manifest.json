@@ -1,9 +1,9 @@
 {
   "id": "pyoink",
   "name": "PyoInk",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "minAppVersion": "1.5.0",
-  "description": "Transparent ink layer over Markdown notes. Pen-only by default; stores strokes as JSON sidecars without modifying notes.",
+  "description": "Transparent ink on Markdown. Draggable toolbar, colors while drawing, pen-only, idle save.",
   "author": "organic4597",
   "authorUrl": "https://github.com/organic4597",
   "isDesktopOnly": false
