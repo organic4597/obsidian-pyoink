@@ -3,8 +3,10 @@ import { PyoInkView, VIEW_TYPE_PYOINK } from "./src/view/PyoInkView";
 import {
   DEFAULT_SETTINGS,
   FINGER_ACTION_LABELS,
+  PENCIL_SINGLE_TAP_LABELS,
   sanitizeSettings,
   type FingerAction,
+  type PencilSingleTapAction,
   type PyoInkSettings,
 } from "./src/util/settings";
 
@@ -62,7 +64,7 @@ export default class PyoInkPlugin extends Plugin {
   }
 }
 
-/** Settings UI: no pen/color/width — those are in-session on the floating toolbar. */
+/** Settings: gestures + storage. Color/width stay on the floating toolbar. */
 class PyoInkSettingTab extends PluginSettingTab {
   constructor(private plugin: PyoInkPlugin) {
     super(plugin.app, plugin);
@@ -73,55 +75,75 @@ class PyoInkSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "PyoInk" });
     containerEl.createEl("p", {
-      text: "Pen color, width, and tools are set on the floating toolbar while writing. Only shortcuts & storage here.",
+      text: "Floating toolbar: pen tools, colors, size. Below: what each tap does.",
     });
 
-    containerEl.createEl("h3", { text: "Apple Pencil" });
+    // ——— Apple Pencil ———
+    containerEl.createEl("h3", { text: "Apple Pencil (tip taps)" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "Tip double-tap = two quick taps with the Pencil tip on the note (works in Obsidian). The side/barrel double-tap is handled by iPadOS and usually never reaches plugins.",
+      text: "Works with tip taps on the note inside Obsidian. iPadOS barrel/side double-tap is not sent to plugins.",
     });
-    new Setting(containerEl)
-      .setName("Enable Pencil tip double-tap")
-      .setDesc("Two quick tip taps → action below (default: cycle pen / marker / eraser).")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.enablePencilDoubleTap !== false).onChange(async (v) => {
-          this.plugin.settings.enablePencilDoubleTap = v;
-          await this.plugin.saveSettings();
-        }),
-      );
-    this.fingerDropdown(
+
+    this.pencilSingleDropdown(
       containerEl,
-      "Pencil tip double-tap action",
-      "pencilDoubleTapAction",
-      this.plugin.settings.pencilDoubleTapAction || "cycle_tool",
+      "Pencil tip single tap",
+      "Short tip tap (almost no drag). Default: draw. Other choices run a shortcut instead of leaving a mark.",
+      this.plugin.settings.pencilSingleTapAction || "ink",
     );
 
-    containerEl.createEl("h3", { text: "Finger shortcuts" });
+    new Setting(containerEl)
+      .setName("Enable Pencil tip double-tap")
+      .setDesc("Two quick tip taps → double-tap action below.")
+      .addToggle((t) =>
+        t
+          .setValue(this.plugin.settings.enablePencilDoubleTap !== false)
+          .onChange(async (v) => {
+            this.plugin.settings.enablePencilDoubleTap = v;
+            await this.plugin.saveSettings();
+            this.display();
+          }),
+      );
+
+    this.actionDropdown(
+      containerEl,
+      "Pencil tip double-tap action",
+      "What two quick tip taps do (default: cycle pen / marker / eraser).",
+      "pencilDoubleTapAction",
+      this.plugin.settings.pencilDoubleTapAction || "cycle_tool",
+      !this.plugin.settings.enablePencilDoubleTap,
+    );
+
+    // ——— Finger ———
+    containerEl.createEl("h3", { text: "Finger taps" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "Short finger taps (not Pencil). Drag/move still scrolls.",
+      text: "Finger only (not Pencil). Scrolling still works when you drag.",
     });
 
-    this.fingerDropdown(
+    this.actionDropdown(
       containerEl,
       "Two-finger tap",
+      "Short two-finger tap.",
       "twoFingerTapAction",
       this.plugin.settings.twoFingerTapAction,
     );
-    this.fingerDropdown(
+    this.actionDropdown(
       containerEl,
       "Three-finger tap",
+      "Short three-finger tap.",
       "threeFingerTapAction",
       this.plugin.settings.threeFingerTapAction,
     );
-    this.fingerDropdown(
+    this.actionDropdown(
       containerEl,
-      "Double-tap (one finger)",
+      "Finger double-tap",
+      "Two quick taps with one finger.",
       "doubleTapAction",
       this.plugin.settings.doubleTapAction,
     );
 
+    // ——— Storage ———
     containerEl.createEl("h3", { text: "Storage" });
 
     new Setting(containerEl)
@@ -139,7 +161,7 @@ class PyoInkSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Idle auto-save")
-      .setDesc("Save after this many seconds with no writing. Always saves when you leave.")
+      .setDesc("Save after idle. Always saves when you leave ink view.")
       .addDropdown((d) => {
         d.addOption("12", "12 seconds");
         d.addOption("20", "20 seconds");
@@ -153,21 +175,46 @@ class PyoInkSettingTab extends PluginSettingTab {
       });
   }
 
-  private fingerDropdown(
+  private pencilSingleDropdown(
     containerEl: HTMLElement,
     name: string,
+    desc: string,
+    value: PencilSingleTapAction,
+  ) {
+    new Setting(containerEl)
+      .setName(name)
+      .setDesc(desc)
+      .addDropdown((d) => {
+        for (const [id, label] of Object.entries(PENCIL_SINGLE_TAP_LABELS)) {
+          d.addOption(id, label);
+        }
+        d.setValue(value);
+        d.onChange(async (v) => {
+          this.plugin.settings.pencilSingleTapAction = v as PencilSingleTapAction;
+          await this.plugin.saveSettings();
+        });
+      });
+  }
+
+  private actionDropdown(
+    containerEl: HTMLElement,
+    name: string,
+    desc: string,
     key:
       | "twoFingerTapAction"
       | "threeFingerTapAction"
       | "doubleTapAction"
       | "pencilDoubleTapAction",
     value: FingerAction,
+    disabled = false,
   ) {
-    new Setting(containerEl).setName(name).addDropdown((d) => {
+    const setting = new Setting(containerEl).setName(name).setDesc(desc);
+    setting.addDropdown((d) => {
       for (const [id, label] of Object.entries(FINGER_ACTION_LABELS)) {
         d.addOption(id, label);
       }
       d.setValue(value);
+      d.setDisabled(disabled);
       d.onChange(async (v) => {
         this.plugin.settings[key] = v as FingerAction;
         if (key === "twoFingerTapAction") {

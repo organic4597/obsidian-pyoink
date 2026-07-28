@@ -1015,6 +1015,23 @@ export class PyoInkView extends ItemView {
         this.requestRedraw();
         return;
       }
+      case "pen-single-tap": {
+        // Short tip tap configured as non-ink action (or ignore)
+        this.engine.cancel();
+        this.gestures.clearActiveDraw();
+        this.state = "ready";
+        try {
+          this.canvas.releasePointerCapture(action.pointerId);
+        } catch {
+          /* */
+        }
+        if (action.action !== "none") {
+          this.runFingerAction(action.action);
+        }
+        this.syncToolbar();
+        this.requestRedraw();
+        return;
+      }
       case "draw-start":
       case "erase-start": {
         // Hard guard: hand/touch must never ink when pen-only (default)

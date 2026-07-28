@@ -668,9 +668,9 @@ var GestureRouter = class {
       const holdMs = performance.now() - (this.penDownAt || performance.now());
       const sample = this.sampleFromEvent(ev, canvasRect);
       const shortTap = this.movedPx < 16 && holdMs < 320;
-      if (sPen.enablePencilDoubleTap !== false && shortTap && wasDrawing && performance.now() - this.lastShortcutAt > 180) {
+      if (shortTap && wasDrawing && performance.now() - this.lastShortcutAt > 160) {
         const now = performance.now();
-        if (now - this.lastPenTapAt < 420 && Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 48) {
+        if (sPen.enablePencilDoubleTap !== false && now - this.lastPenTapAt < 420 && Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 48) {
           this.lastPenTapAt = 0;
           this.lastShortcutAt = now;
           this.clearActiveDraw();
@@ -684,6 +684,19 @@ var GestureRouter = class {
         this.lastPenTapAt = now;
         this.lastPenTapX = sample.x;
         this.lastPenTapY = sample.y;
+        const single = sPen.pencilSingleTapAction || "ink";
+        if (single !== "ink") {
+          this.lastShortcutAt = now;
+          this.clearActiveDraw();
+          if (single === "none") {
+            return { type: "pen-single-tap", action: "none", pointerId: ev.pointerId };
+          }
+          return {
+            type: "pen-single-tap",
+            action: single,
+            pointerId: ev.pointerId
+          };
+        }
       }
     }
     if (ev.pointerType === "touch") {
@@ -1079,15 +1092,27 @@ var InkStore = class {
 
 // src/util/settings.ts
 var FINGER_ACTION_LABELS = {
-  none: "None",
+  none: "None (no shortcut)",
+  cycle_tool: "Cycle tool (pen \u2192 marker \u2192 eraser)",
+  undo: "Undo",
+  redo: "Redo",
+  toggle_nav: "Toggle navigate mode",
+  pen: "Switch to pen",
+  highlighter: "Switch to highlighter",
+  eraser: "Switch to eraser",
+  exit: "Leave ink view (save)"
+};
+var PENCIL_SINGLE_TAP_LABELS = {
+  ink: "Draw / write (default)",
+  none: "Ignore short tap (no mark)",
   cycle_tool: "Cycle tool",
   undo: "Undo",
   redo: "Redo",
-  toggle_nav: "Toggle navigate",
-  pen: "Pen",
-  highlighter: "Highlighter",
-  eraser: "Eraser",
-  exit: "Leave (save)"
+  toggle_nav: "Toggle navigate mode",
+  pen: "Switch to pen",
+  highlighter: "Switch to highlighter",
+  eraser: "Switch to eraser",
+  exit: "Leave ink view (save)"
 };
 var PEN_COLORS = [
   "#1a1a1a",
@@ -1142,6 +1167,7 @@ var DEFAULT_SETTINGS = {
   enableTwoFingerToolCycle: true,
   enablePencilDoubleTap: true,
   pencilDoubleTapAction: "cycle_tool",
+  pencilSingleTapAction: "ink",
   penOnlyInk: true,
   allowFingerDraw: false,
   palmRejectMs: 700,
@@ -1198,6 +1224,14 @@ function sanitizeSettings(raw) {
     s2.pencilDoubleTapAction,
     "cycle_tool"
   );
+  {
+    const raw2 = String(s2.pencilSingleTapAction || "ink");
+    if (raw2 === "ink" || FINGER_ACTIONS.has(raw2)) {
+      s2.pencilSingleTapAction = raw2;
+    } else {
+      s2.pencilSingleTapAction = "ink";
+    }
+  }
   if (s2.enableTwoFingerToolCycle === false && s2.twoFingerTapAction === "cycle_tool") {
     s2.twoFingerTapAction = "none";
   }
@@ -2058,6 +2092,21 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         this.requestRedraw();
         return;
       }
+      case "pen-single-tap": {
+        this.engine.cancel();
+        this.gestures.clearActiveDraw();
+        this.state = "ready";
+        try {
+          this.canvas.releasePointerCapture(action.pointerId);
+        } catch {
+        }
+        if (action.action !== "none") {
+          this.runFingerAction(action.action);
+        }
+        this.syncToolbar();
+        this.requestRedraw();
+        return;
+      }
       case "draw-start":
       case "erase-start": {
         if (ev.pointerType === "touch" && this.plugin.settings.penOnlyInk !== false) {
@@ -2357,45 +2406,57 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "PyoInk" });
     containerEl.createEl("p", {
-      text: "Pen color, width, and tools are set on the floating toolbar while writing. Only shortcuts & storage here."
+      text: "Floating toolbar: pen tools, colors, size. Below: what each tap does."
     });
-    containerEl.createEl("h3", { text: "Apple Pencil" });
+    containerEl.createEl("h3", { text: "Apple Pencil (tip taps)" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "Tip double-tap = two quick taps with the Pencil tip on the note (works in Obsidian). The side/barrel double-tap is handled by iPadOS and usually never reaches plugins."
+      text: "Works with tip taps on the note inside Obsidian. iPadOS barrel/side double-tap is not sent to plugins."
     });
-    new import_obsidian3.Setting(containerEl).setName("Enable Pencil tip double-tap").setDesc("Two quick tip taps \u2192 action below (default: cycle pen / marker / eraser).").addToggle(
+    this.pencilSingleDropdown(
+      containerEl,
+      "Pencil tip single tap",
+      "Short tip tap (almost no drag). Default: draw. Other choices run a shortcut instead of leaving a mark.",
+      this.plugin.settings.pencilSingleTapAction || "ink"
+    );
+    new import_obsidian3.Setting(containerEl).setName("Enable Pencil tip double-tap").setDesc("Two quick tip taps \u2192 double-tap action below.").addToggle(
       (t2) => t2.setValue(this.plugin.settings.enablePencilDoubleTap !== false).onChange(async (v2) => {
         this.plugin.settings.enablePencilDoubleTap = v2;
         await this.plugin.saveSettings();
+        this.display();
       })
     );
-    this.fingerDropdown(
+    this.actionDropdown(
       containerEl,
       "Pencil tip double-tap action",
+      "What two quick tip taps do (default: cycle pen / marker / eraser).",
       "pencilDoubleTapAction",
-      this.plugin.settings.pencilDoubleTapAction || "cycle_tool"
+      this.plugin.settings.pencilDoubleTapAction || "cycle_tool",
+      !this.plugin.settings.enablePencilDoubleTap
     );
-    containerEl.createEl("h3", { text: "Finger shortcuts" });
+    containerEl.createEl("h3", { text: "Finger taps" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "Short finger taps (not Pencil). Drag/move still scrolls."
+      text: "Finger only (not Pencil). Scrolling still works when you drag."
     });
-    this.fingerDropdown(
+    this.actionDropdown(
       containerEl,
       "Two-finger tap",
+      "Short two-finger tap.",
       "twoFingerTapAction",
       this.plugin.settings.twoFingerTapAction
     );
-    this.fingerDropdown(
+    this.actionDropdown(
       containerEl,
       "Three-finger tap",
+      "Short three-finger tap.",
       "threeFingerTapAction",
       this.plugin.settings.threeFingerTapAction
     );
-    this.fingerDropdown(
+    this.actionDropdown(
       containerEl,
-      "Double-tap (one finger)",
+      "Finger double-tap",
+      "Two quick taps with one finger.",
       "doubleTapAction",
       this.plugin.settings.doubleTapAction
     );
@@ -2409,7 +2470,7 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Idle auto-save").setDesc("Save after this many seconds with no writing. Always saves when you leave.").addDropdown((d2) => {
+    new import_obsidian3.Setting(containerEl).setName("Idle auto-save").setDesc("Save after idle. Always saves when you leave ink view.").addDropdown((d2) => {
       d2.addOption("12", "12 seconds");
       d2.addOption("20", "20 seconds");
       d2.addOption("30", "30 seconds");
@@ -2421,12 +2482,26 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
       });
     });
   }
-  fingerDropdown(containerEl, name, key, value) {
-    new import_obsidian3.Setting(containerEl).setName(name).addDropdown((d2) => {
+  pencilSingleDropdown(containerEl, name, desc, value) {
+    new import_obsidian3.Setting(containerEl).setName(name).setDesc(desc).addDropdown((d2) => {
+      for (const [id, label] of Object.entries(PENCIL_SINGLE_TAP_LABELS)) {
+        d2.addOption(id, label);
+      }
+      d2.setValue(value);
+      d2.onChange(async (v2) => {
+        this.plugin.settings.pencilSingleTapAction = v2;
+        await this.plugin.saveSettings();
+      });
+    });
+  }
+  actionDropdown(containerEl, name, desc, key, value, disabled = false) {
+    const setting = new import_obsidian3.Setting(containerEl).setName(name).setDesc(desc);
+    setting.addDropdown((d2) => {
       for (const [id, label] of Object.entries(FINGER_ACTION_LABELS)) {
         d2.addOption(id, label);
       }
       d2.setValue(value);
+      d2.setDisabled(disabled);
       d2.onChange(async (v2) => {
         this.plugin.settings[key] = v2;
         if (key === "twoFingerTapAction") {

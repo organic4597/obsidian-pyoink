@@ -12,6 +12,8 @@ export type GestureAction =
   | { type: "finger-action"; action: FingerAction }
   /** Pencil tip double-tap — cancel active stroke + optional undo of first tap */
   | { type: "pen-double-tap"; action: FingerAction; pointerId: number }
+  /** Pencil tip short single tap with non-ink action */
+  | { type: "pen-single-tap"; action: FingerAction; pointerId: number }
   /** @deprecated use finger-action */
   | { type: "tool-cycle" };
 
@@ -209,20 +211,17 @@ export class GestureRouter {
       this.penDownIds.delete(ev.pointerId);
       this.lastPenAt = performance.now();
 
-      // Pencil tip double-tap (barrel hardware tap is NOT available in WebView)
+      // Pencil tip double / single tap (barrel OS double-tap is NOT in WebView)
       const sPen = s;
       const wasDrawing = this.activeDrawId === ev.pointerId;
       const holdMs = performance.now() - (this.penDownAt || performance.now());
       const sample = this.sampleFromEvent(ev, canvasRect);
       const shortTap = this.movedPx < 16 && holdMs < 320;
-      if (
-        sPen.enablePencilDoubleTap !== false &&
-        shortTap &&
-        wasDrawing &&
-        performance.now() - this.lastShortcutAt > 180
-      ) {
+      if (shortTap && wasDrawing && performance.now() - this.lastShortcutAt > 160) {
         const now = performance.now();
+        // Double-tap first
         if (
+          sPen.enablePencilDoubleTap !== false &&
           now - this.lastPenTapAt < 420 &&
           Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 48
         ) {
@@ -239,9 +238,26 @@ export class GestureRouter {
             pointerId: ev.pointerId,
           };
         }
+        // Record for possible second tap
         this.lastPenTapAt = now;
         this.lastPenTapX = sample.x;
         this.lastPenTapY = sample.y;
+
+        // Single short tip tap → optional non-ink action
+        const single = sPen.pencilSingleTapAction || "ink";
+        if (single !== "ink") {
+          this.lastShortcutAt = now;
+          this.clearActiveDraw();
+          if (single === "none") {
+            // swallow short tap (no ink, no shortcut)
+            return { type: "pen-single-tap", action: "none", pointerId: ev.pointerId };
+          }
+          return {
+            type: "pen-single-tap",
+            action: single as FingerAction,
+            pointerId: ev.pointerId,
+          };
+        }
       }
     }
 

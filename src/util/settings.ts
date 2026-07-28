@@ -15,15 +15,31 @@ export type FingerAction =
   | "exit";
 
 export const FINGER_ACTION_LABELS: Record<FingerAction, string> = {
-  none: "None",
+  none: "None (no shortcut)",
+  cycle_tool: "Cycle tool (pen → marker → eraser)",
+  undo: "Undo",
+  redo: "Redo",
+  toggle_nav: "Toggle navigate mode",
+  pen: "Switch to pen",
+  highlighter: "Switch to highlighter",
+  eraser: "Switch to eraser",
+  exit: "Leave ink view (save)",
+};
+
+/** Pencil tip single-tap: ink (draw) or a shortcut action. */
+export type PencilSingleTapAction = FingerAction | "ink";
+
+export const PENCIL_SINGLE_TAP_LABELS: Record<PencilSingleTapAction, string> = {
+  ink: "Draw / write (default)",
+  none: "Ignore short tap (no mark)",
   cycle_tool: "Cycle tool",
   undo: "Undo",
   redo: "Redo",
-  toggle_nav: "Toggle navigate",
-  pen: "Pen",
-  highlighter: "Highlighter",
-  eraser: "Eraser",
-  exit: "Leave (save)",
+  toggle_nav: "Toggle navigate mode",
+  pen: "Switch to pen",
+  highlighter: "Switch to highlighter",
+  eraser: "Switch to eraser",
+  exit: "Leave ink view (save)",
 };
 
 export const PEN_COLORS = [
@@ -59,6 +75,11 @@ export interface PyoInkSettings {
   enablePencilDoubleTap: boolean;
   /** Action for Pencil tip double-tap (default: cycle tools). */
   pencilDoubleTapAction: FingerAction;
+  /**
+   * Short single tip tap: `ink` = draw (default), or a shortcut (no stroke).
+   * Only applies to short taps (little movement); drags always draw.
+   */
+  pencilSingleTapAction: PencilSingleTapAction;
   /** @deprecated use enablePencilDoubleTap */
   enablePencilDoubleTapProbe?: boolean;
   penOnlyInk: boolean;
@@ -128,6 +149,7 @@ export const DEFAULT_SETTINGS: PyoInkSettings = {
   enableTwoFingerToolCycle: true,
   enablePencilDoubleTap: true,
   pencilDoubleTapAction: "cycle_tool",
+  pencilSingleTapAction: "ink",
   penOnlyInk: true,
   allowFingerDraw: false,
   palmRejectMs: 700,
@@ -187,6 +209,15 @@ export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined
     s.pencilDoubleTapAction,
     "cycle_tool",
   );
+  // pencil single tap: ink | finger actions
+  {
+    const raw = String(s.pencilSingleTapAction || "ink");
+    if (raw === "ink" || FINGER_ACTIONS.has(raw)) {
+      s.pencilSingleTapAction = raw as PencilSingleTapAction;
+    } else {
+      s.pencilSingleTapAction = "ink";
+    }
+  }
   // legacy: enableTwoFingerToolCycle false → none
   if (s.enableTwoFingerToolCycle === false && s.twoFingerTapAction === "cycle_tool") {
     s.twoFingerTapAction = "none";
