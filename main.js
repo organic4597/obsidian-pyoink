@@ -2000,31 +2000,12 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "PyoInk" });
     containerEl.createEl("p", {
-      text: "Transparent ink on Markdown. Pen draws; finger gestures are shortcuts. Auto-save after 12s idle or on leave."
+      text: "Pen color, width, and tools are set on the floating toolbar while writing. Only shortcuts & storage here."
     });
-    new import_obsidian3.Setting(containerEl).setName("Pen-only ink").setDesc("Only Apple Pencil draws. Finger = scroll / shortcuts.").addToggle(
-      (t2) => t2.setValue(this.plugin.settings.penOnlyInk !== false).onChange(async (v2) => {
-        this.plugin.settings.penOnlyInk = v2;
-        if (v2) this.plugin.settings.allowFingerDraw = false;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Idle save delay (ms)").setDesc("Default 12000 (12s) with no writing. Always saves when leaving.").addSlider(
-      (s2) => s2.setLimits(12e3, 3e4, 1e3).setValue(this.plugin.settings.debounceMs).setDynamicTooltip().onChange(async (v2) => {
-        this.plugin.settings.debounceMs = v2;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Undo / Redo stack size").setDesc("Queue depth (max 50). Oldest dropped when full.").addSlider(
-      (s2) => s2.setLimits(10, 50, 1).setValue(this.plugin.settings.undoLimit).setDynamicTooltip().onChange(async (v2) => {
-        this.plugin.settings.undoLimit = v2;
-        await this.plugin.saveSettings();
-      })
-    );
     containerEl.createEl("h3", { text: "Finger shortcuts" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
-      text: "Assign actions to finger taps (not pencil). Short taps only; move = scroll."
+      text: "Short finger taps (not Pencil). Drag/move still scrolls."
     });
     this.fingerDropdown(
       containerEl,
@@ -2044,7 +2025,8 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
       "doubleTapAction",
       this.plugin.settings.doubleTapAction
     );
-    new import_obsidian3.Setting(containerEl).setName("Annotations folder").addText(
+    containerEl.createEl("h3", { text: "Storage" });
+    new import_obsidian3.Setting(containerEl).setName("Annotations folder").setDesc("Where .pyoink.json files are stored (not under .obsidian).").addText(
       (t2) => t2.setValue(this.plugin.settings.annotationsFolder).onChange(async (v2) => {
         this.plugin.settings = sanitizeSettings({
           ...this.plugin.settings,
@@ -2053,6 +2035,17 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    new import_obsidian3.Setting(containerEl).setName("Idle auto-save").setDesc("Save after this many seconds with no writing. Always saves when you leave.").addDropdown((d2) => {
+      d2.addOption("12", "12 seconds");
+      d2.addOption("20", "20 seconds");
+      d2.addOption("30", "30 seconds");
+      const cur = String(Math.round((this.plugin.settings.debounceMs || 12e3) / 1e3));
+      d2.setValue(["12", "20", "30"].includes(cur) ? cur : "12");
+      d2.onChange(async (v2) => {
+        this.plugin.settings.debounceMs = Number(v2) * 1e3;
+        await this.plugin.saveSettings();
+      });
+    });
   }
   fingerDropdown(containerEl, name, key, value) {
     new import_obsidian3.Setting(containerEl).setName(name).addDropdown((d2) => {
