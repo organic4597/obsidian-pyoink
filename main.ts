@@ -82,10 +82,10 @@ class PyoInkSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Idle save delay (ms)")
-      .setDesc("Higher = less lag while writing. Always saves on exit.")
+      .setDesc("Default 12000ms (12s) with no writing. Always saves when leaving PyoInk.")
       .addSlider((s) =>
         s
-          .setLimits(2000, 20000, 500)
+          .setLimits(12000, 30000, 1000)
           .setValue(this.plugin.settings.debounceMs)
           .setDynamicTooltip()
           .onChange(async (v) => {

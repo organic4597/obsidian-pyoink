@@ -25,6 +25,7 @@ export interface PyoInkSettings {
   highlighterColor: string;
   penWidth: number;
   highlighterWidth: number;
+  eraserWidth: number;
   toolCycle: InkTool[];
   enableTwoFingerToolCycle: boolean;
   enablePencilDoubleTapProbe: boolean;
@@ -36,7 +37,7 @@ export interface PyoInkSettings {
   pfSmoothing: number;
   pfThinning: number;
   pfStreamline: number;
-  /** Idle save delay. High = less hitch while writing. Flush always on exit. */
+  /** Idle ms with no ink before auto-save (default 12s). Always save on leave. */
   debounceMs: number;
   maxCanvasCssHeight: number;
   undoLimit: number;
@@ -51,6 +52,7 @@ export const DEFAULT_SETTINGS: PyoInkSettings = {
   highlighterColor: "#ffe566",
   penWidth: 2.4,
   highlighterWidth: 16,
+  eraserWidth: 28,
   toolCycle: ["pen", "highlighter", "eraser"],
   enableTwoFingerToolCycle: true,
   enablePencilDoubleTapProbe: false,
@@ -62,8 +64,8 @@ export const DEFAULT_SETTINGS: PyoInkSettings = {
   pfSmoothing: 0.5,
   pfThinning: 0.5,
   pfStreamline: 0.5,
-  // Don't thrash disk while writing — 8s idle or exit
-  debounceMs: 8000,
+  // Save only after 12s with no writing, or on leave
+  debounceMs: 12000,
   maxCanvasCssHeight: 8192,
   undoLimit: 40,
   toolbarXPct: 50,
@@ -79,6 +81,7 @@ export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined
   s.annotationsFolder = folder.replace(/\/+$/, "");
   s.penWidth = clamp(Number(s.penWidth), 0.5, 40);
   s.highlighterWidth = clamp(Number(s.highlighterWidth), 2, 80);
+  s.eraserWidth = clamp(Number(s.eraserWidth), 8, 120);
   s.pressureGain = clamp(Number(s.pressureGain), 0.3, 3);
   s.pfSmoothing = clamp(Number(s.pfSmoothing), 0, 0.95);
   s.pfThinning = clamp(Number(s.pfThinning), -0.99, 0.99);

@@ -10,9 +10,10 @@ export class StrokeEngine {
   private active: InkStroke | null = null;
   private lastPressure = 0.5;
   private sawRealPressure = false;
-  /** Erase gesture in progress */
   private erasing = false;
   private eraseDirty = false;
+  /** Snapshot index at erase start — discard if nothing removed */
+  private eraseUndoPushed = false;
 
   constructor(private settings: PyoInkSettings) {}
 
@@ -28,6 +29,14 @@ export class StrokeEngine {
     return this.active !== null || this.erasing;
   }
 
+  canUndo(): boolean {
+    return !this.isStroking() && this.undoStack.length > 0;
+  }
+
+  canRedo(): boolean {
+    return !this.isStroking() && this.redoStack.length > 0;
+  }
+
   private cloneStrokes(list: InkStroke[]): InkStroke[] {
     return list.map((s) => ({ ...s, points: s.points.map((p) => [...p] as PointTuple) }));
   }
@@ -35,6 +44,7 @@ export class StrokeEngine {
   private pushUndo() {
     this.undoStack.push(this.cloneStrokes(this.strokes));
     if (this.undoStack.length > this.settings.undoLimit) this.undoStack.shift();
+    // new branch kills redo
     this.redoStack = [];
   }
 
@@ -78,10 +88,11 @@ export class StrokeEngine {
       const changed = this.eraseDirty;
       this.erasing = false;
       this.eraseDirty = false;
-      // if nothing erased, drop the undo frame we pushed
-      if (!changed && this.undoStack.length) {
-        this.strokes = this.undoStack.pop()!;
+      if (!changed && this.eraseUndoPushed) {
+        // discard empty erase snapshot — do NOT assign strokes from stack
+        this.undoStack.pop();
       }
+      this.eraseUndoPushed = false;
       return changed;
     }
     if (!this.active) return false;
@@ -93,13 +104,15 @@ export class StrokeEngine {
 
   cancel() {
     if (this.erasing) {
-      // revert erase
-      if (this.undoStack.length) this.strokes = this.undoStack.pop()!;
+      if (this.eraseUndoPushed && this.undoStack.length) {
+        this.strokes = this.undoStack.pop()!;
+      }
       this.erasing = false;
       this.eraseDirty = false;
+      this.eraseUndoPushed = false;
     }
     if (this.active) {
-      // drop active without commit; undo already pushed — pop
+      // drop unfinished stroke; undo already has pre-stroke state
       if (this.undoStack.length) this.strokes = this.undoStack.pop()!;
       this.active = null;
     }
@@ -110,6 +123,7 @@ export class StrokeEngine {
       this.pushUndo();
       this.erasing = true;
       this.eraseDirty = false;
+      this.eraseUndoPushed = true;
     }
   }
 
@@ -134,7 +148,7 @@ export class StrokeEngine {
   }
 
   undo(): boolean {
-    if (this.active || this.erasing) return false;
+    if (this.isStroking()) return false;
     if (!this.undoStack.length) return false;
     this.redoStack.push(this.cloneStrokes(this.strokes));
     this.strokes = this.undoStack.pop()!;
@@ -142,7 +156,7 @@ export class StrokeEngine {
   }
 
   redo(): boolean {
-    if (this.active || this.erasing) return false;
+    if (this.isStroking()) return false;
     if (!this.redoStack.length) return false;
     this.undoStack.push(this.cloneStrokes(this.strokes));
     this.strokes = this.redoStack.pop()!;
@@ -154,6 +168,7 @@ export class StrokeEngine {
     this.active = null;
     this.erasing = false;
     this.eraseDirty = false;
+    this.eraseUndoPushed = false;
     this.undoStack = [];
     this.redoStack = [];
   }

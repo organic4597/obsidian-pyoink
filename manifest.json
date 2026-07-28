@@ -1,9 +1,9 @@
 {
   "id": "pyoink",
   "name": "PyoInk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minAppVersion": "1.5.0",
-  "description": "Transparent ink on Markdown. Draggable toolbar, colors while drawing, pen-only, idle save.",
+  "description": "Ink on Markdown. Undo/redo, eraser preview, colors & width, 12s idle save, leave to save.",
   "author": "organic4597",
   "authorUrl": "https://github.com/organic4597",
   "isDesktopOnly": false

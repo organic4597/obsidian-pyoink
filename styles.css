@@ -165,3 +165,12 @@
 .pyoink-width-btn.is-active {
   color: var(--text-on-accent);
 }
+
+.pyoink-toolbar button[disabled] {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.pyoink-canvas {
+  cursor: none;
+}

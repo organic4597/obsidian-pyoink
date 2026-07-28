@@ -51,6 +51,12 @@ export class PyoInkView extends ItemView {
   private colorRowEl!: HTMLElement;
   private navBtn: HTMLButtonElement | null = null;
   private dragBound = false;
+  private cursorX = -1;
+  private cursorY = -1;
+  private cursorOn = false;
+  private undoBtn: HTMLButtonElement | null = null;
+  private redoBtn: HTMLButtonElement | null = null;
+  private widthRowEl!: HTMLElement;
 
   private saveTimer: number | null = null;
   private raf = 0;
@@ -192,11 +198,9 @@ export class PyoInkView extends ItemView {
     this.toolbarEl = this.rootEl.createDiv({ cls: "pyoink-toolbar" });
     this.applyToolbarPos();
 
-    // Drag handle
     const drag = this.toolbarEl.createDiv({ cls: "pyoink-tb-drag" });
     this.bindToolbarDrag(drag);
 
-    // Tools row
     const tools = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
     this.iconBtn(tools, "pen", "pencil", "Pen");
     this.iconBtn(tools, "highlighter", "highlighter", "Highlighter");
@@ -207,21 +211,35 @@ export class PyoInkView extends ItemView {
     setIcon(this.navBtn, "mouse-pointer-click");
     this.navBtn.onclick = () => this.setNavigate(!this.gestures.navigateMode);
 
-    const undo = tools.createEl("button");
-    undo.title = "Undo";
-    setIcon(undo, "undo-2");
-    undo.onclick = () => {
+    this.undoBtn = tools.createEl("button");
+    this.undoBtn.title = "Undo";
+    setIcon(this.undoBtn, "undo-2");
+    this.undoBtn.onclick = () => {
       this.finishStrokeIfNeeded();
       if (this.engine.undo()) {
         this.cacheValid = false;
         this.markDirty();
         this.requestRedraw();
+        this.syncToolbar();
+      }
+    };
+
+    this.redoBtn = tools.createEl("button");
+    this.redoBtn.title = "Redo";
+    setIcon(this.redoBtn, "redo-2");
+    this.redoBtn.onclick = () => {
+      this.finishStrokeIfNeeded();
+      if (this.engine.redo()) {
+        this.cacheValid = false;
+        this.markDirty();
+        this.requestRedraw();
+        this.syncToolbar();
       }
     };
 
     const exit = tools.createEl("button");
-    exit.title = "Save & exit";
-    setIcon(exit, "check");
+    exit.title = "Leave (save on exit)";
+    setIcon(exit, "log-out");
     exit.onclick = async () => {
       const ok = await this.flushSave();
       if (!ok && this.dirty) {
@@ -230,27 +248,10 @@ export class PyoInkView extends ItemView {
       if (this.file) await this.leaf.openFile(this.file);
     };
 
-    // Color row — always available (including between strokes)
     this.colorRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
+    this.widthRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
     this.rebuildColorRow();
-
-    // Width row
-    const widths = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
-    for (const [label, penW, hiW] of [
-      ["S", 1.6, 10],
-      ["M", 2.4, 16],
-      ["L", 4.0, 24],
-    ] as const) {
-      const b = widths.createEl("button", { text: label, cls: "pyoink-width-btn" });
-      b.dataset.w = label;
-      b.onclick = () => {
-        this.plugin.settings.penWidth = penW;
-        this.plugin.settings.highlighterWidth = hiW;
-        void this.plugin.saveSettings();
-        this.syncToolbar();
-      };
-    }
-
+    this.rebuildWidthRow();
     this.syncToolbar();
   }
 
@@ -260,19 +261,20 @@ export class PyoInkView extends ItemView {
     b.title = title;
     setIcon(b, icon);
     b.onclick = () => {
-      // Color/tool change allowed anytime — end active stroke first
       this.finishStrokeIfNeeded();
       this.setTool(tool);
       this.setNavigate(false);
       this.rebuildColorRow();
+      this.rebuildWidthRow();
       this.syncToolbar();
+      this.updateCanvasCursor();
     };
   }
 
   private rebuildColorRow() {
     this.colorRowEl.empty();
     const tool = this.gestures.getTool();
-    if (tool === "eraser") {
+    if (tool === "eraser" || this.gestures.navigateMode) {
       this.colorRowEl.style.display = "none";
       return;
     }
@@ -286,13 +288,54 @@ export class PyoInkView extends ItemView {
       const b = this.colorRowEl.createEl("button", { cls: "pyoink-swatch" });
       b.style.background = c;
       b.title = c;
-      if (c.toLowerCase() === cur.toLowerCase()) b.classList.add("is-active");
+      if (c.toLowerCase() === String(cur).toLowerCase()) b.classList.add("is-active");
       b.onclick = () => {
         this.finishStrokeIfNeeded();
         if (tool === "highlighter") this.plugin.settings.highlighterColor = c;
         else this.plugin.settings.penColor = c;
         void this.plugin.saveSettings();
         this.rebuildColorRow();
+        this.updateCanvasCursor();
+      };
+    }
+  }
+
+  private rebuildWidthRow() {
+    this.widthRowEl.empty();
+    if (this.gestures.navigateMode) {
+      this.widthRowEl.style.display = "none";
+      return;
+    }
+    this.widthRowEl.style.display = "";
+    const tool = this.gestures.getTool();
+    const presets =
+      tool === "eraser"
+        ? ([["S", 16], ["M", 28], ["L", 48]] as const)
+        : tool === "highlighter"
+          ? ([["S", 10], ["M", 16], ["L", 28]] as const)
+          : ([["S", 1.6], ["M", 2.4], ["L", 4.5]] as const);
+    const cur =
+      tool === "eraser"
+        ? this.plugin.settings.eraserWidth
+        : tool === "highlighter"
+          ? this.plugin.settings.highlighterWidth
+          : this.plugin.settings.penWidth;
+    for (const [label, w] of presets) {
+      const b = this.widthRowEl.createEl("button", { text: label, cls: "pyoink-width-btn" });
+      b.dataset.w = label;
+      // nearest preset active
+      const dists = presets.map((p) => Math.abs(p[1] - cur));
+      const best = dists.indexOf(Math.min(...dists));
+      if (presets[best][0] === label) b.classList.add("is-active");
+      b.onclick = () => {
+        this.finishStrokeIfNeeded();
+        if (tool === "eraser") this.plugin.settings.eraserWidth = w;
+        else if (tool === "highlighter") this.plugin.settings.highlighterWidth = w;
+        else this.plugin.settings.penWidth = w;
+        void this.plugin.saveSettings();
+        this.rebuildWidthRow();
+        this.updateCanvasCursor();
+        this.requestRedraw();
       };
     }
   }
@@ -305,6 +348,7 @@ export class PyoInkView extends ItemView {
     this.cacheValid = false;
     if (changed) this.markDirty();
     this.requestRedraw();
+    this.syncToolbar();
   }
 
   private applyToolbarPos() {
@@ -361,12 +405,16 @@ export class PyoInkView extends ItemView {
     this.gestures.navigateMode = on;
     this.pageEl.classList.toggle("is-navigate", on);
     this.canvas.classList.toggle("is-pass-through", on);
+    this.rebuildColorRow();
+    this.rebuildWidthRow();
     this.syncToolbar();
+    this.updateCanvasCursor();
   }
 
   setTool(t: InkTool) {
     this.gestures.setTool(t);
     this.syncToolbar();
+    this.updateCanvasCursor();
   }
 
   cycleTool() {
@@ -377,6 +425,72 @@ export class PyoInkView extends ItemView {
     const i = order.indexOf(cur);
     this.setTool(order[(i + 1) % order.length]);
     this.rebuildColorRow();
+    this.rebuildWidthRow();
+  }
+
+  private currentBrushRadius(): number {
+    const tool = this.gestures.getTool();
+    if (tool === "eraser") return this.plugin.settings.eraserWidth / 2;
+    if (tool === "highlighter") return this.plugin.settings.highlighterWidth / 2;
+    return Math.max(4, this.plugin.settings.penWidth * 2);
+  }
+
+  private updateCanvasCursor() {
+    if (this.gestures.navigateMode) {
+      this.canvas.style.cursor = "pointer";
+      return;
+    }
+    // custom ring drawn on canvas
+    this.canvas.style.cursor = "none";
+  }
+
+  private paintCursor(ctx: CanvasRenderingContext2D) {
+    if (!this.cursorOn || this.gestures.navigateMode) return;
+    if (this.cursorX < 0 || this.cursorY < 0) return;
+    const r = this.currentBrushRadius();
+    const tool = this.gestures.getTool();
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(this.cursorX, this.cursorY, r, 0, Math.PI * 2);
+    if (tool === "eraser") {
+      ctx.strokeStyle = "rgba(220, 50, 50, 0.95)";
+      ctx.fillStyle = "rgba(220, 50, 50, 0.12)";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 3]);
+    } else if (tool === "highlighter") {
+      ctx.strokeStyle = this.plugin.settings.highlighterColor;
+      ctx.fillStyle = this.hexAlpha(this.plugin.settings.highlighterColor, 0.25);
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+    } else {
+      ctx.strokeStyle = this.plugin.settings.penColor;
+      ctx.fillStyle = this.hexAlpha(this.plugin.settings.penColor, 0.18);
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+    }
+    ctx.fill();
+    ctx.stroke();
+    // center dot
+    ctx.beginPath();
+    ctx.setLineDash([]);
+    ctx.fillStyle = tool === "eraser" ? "rgba(220,50,50,0.9)" : this.plugin.settings.penColor;
+    if (tool === "highlighter") ctx.fillStyle = this.plugin.settings.highlighterColor;
+    ctx.arc(this.cursorX, this.cursorY, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  private hexAlpha(hex: string, a: number): string {
+    const h = hex.replace("#", "");
+    if (h.length !== 6) return `rgba(0,0,0,${a})`;
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    return `rgba(${r},${g},${b},${a})`;
+  }
+
+  private eraserRadius(): number {
+    return this.plugin.settings.eraserWidth || 28;
   }
 
   private syncToolbar() {
@@ -388,14 +502,8 @@ export class PyoInkView extends ItemView {
       );
     });
     if (this.navBtn) this.navBtn.classList.toggle("is-active", this.gestures.navigateMode);
-    const pw = this.plugin.settings.penWidth;
-    this.toolbarEl.querySelectorAll("button[data-w]").forEach((el) => {
-      const b = el as HTMLButtonElement;
-      const lab = b.dataset.w;
-      const active =
-        (lab === "S" && pw <= 2) || (lab === "M" && pw > 2 && pw < 3.5) || (lab === "L" && pw >= 3.5);
-      b.classList.toggle("is-active", active);
-    });
+    if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
+    if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
   }
 
   private bindKeys() {
@@ -410,16 +518,29 @@ export class PyoInkView extends ItemView {
         ev.preventDefault();
       }
       if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "z") {
+        this.finishStrokeIfNeeded();
         if (ev.shiftKey) {
           if (this.engine.redo()) {
             this.cacheValid = false;
             this.markDirty();
             this.requestRedraw();
+            this.syncToolbar();
           }
         } else if (this.engine.undo()) {
           this.cacheValid = false;
           this.markDirty();
           this.requestRedraw();
+          this.syncToolbar();
+        }
+        ev.preventDefault();
+      }
+      if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "y") {
+        this.finishStrokeIfNeeded();
+        if (this.engine.redo()) {
+          this.cacheValid = false;
+          this.markDirty();
+          this.requestRedraw();
+          this.syncToolbar();
         }
         ev.preventDefault();
       }
@@ -488,6 +609,24 @@ export class PyoInkView extends ItemView {
       },
       { passive: false },
     );
+
+    c.addEventListener("pointermove", (ev) => {
+      // hover preview (also fires while drawing)
+      const rect = c.getBoundingClientRect();
+      this.cursorX = ev.clientX - rect.left;
+      this.cursorY = ev.clientY - rect.top;
+      this.cursorOn = true;
+      if (!this.gestures.isDrawing() && this.state === "ready") this.requestRedraw();
+    }, { capture: true });
+    c.addEventListener("pointerenter", () => {
+      this.cursorOn = true;
+      this.updateCanvasCursor();
+    });
+    c.addEventListener("pointerleave", () => {
+      this.cursorOn = false;
+      this.requestRedraw();
+    });
+    this.updateCanvasCursor();
   }
 
   private handleGesture(
@@ -556,13 +695,13 @@ export class PyoInkView extends ItemView {
         const sample = this.gestures.sampleFromEvent(ev, rect);
         if (action.type === "erase-start" || this.gestures.getTool() === "eraser") {
           this.engine.beginErase();
-          this.engine.eraseAt(sample.x, sample.y, 24);
+          this.engine.eraseAt(sample.x, sample.y, this.eraserRadius());
           this.cacheValid = false;
         } else {
           const tool = this.gestures.getTool();
           if (tool === "eraser") {
             this.engine.beginErase();
-            this.engine.eraseAt(sample.x, sample.y, 24);
+            this.engine.eraseAt(sample.x, sample.y, this.eraserRadius());
             this.cacheValid = false;
           } else {
             const color =
@@ -587,7 +726,7 @@ export class PyoInkView extends ItemView {
       }
       case "draw-move": {
         if (this.gestures.getTool() === "eraser" || this.engine.getActive() === null) {
-          for (const s of action.samples) this.engine.eraseAt(s.x, s.y, 24);
+          for (const s of action.samples) this.engine.eraseAt(s.x, s.y, this.eraserRadius());
           this.cacheValid = false;
         } else {
           this.engine.extend(action.samples);
@@ -601,6 +740,7 @@ export class PyoInkView extends ItemView {
         this.state = "ready";
         this.cacheValid = false;
         if (changed) this.markDirty();
+        this.syncToolbar();
         this.requestRedraw();
         try {
           this.canvas.releasePointerCapture(ev.pointerId);
@@ -644,11 +784,11 @@ export class PyoInkView extends ItemView {
   }
 
   private scheduleSave() {
-    const ms = Math.max(3000, this.plugin.settings.debounceMs || 8000);
+    // 12s idle with no ink activity, or leave screen
+    const ms = Math.max(12000, this.plugin.settings.debounceMs || 12000);
     if (this.saveTimer) window.clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => {
       if (this.engine.isStroking() || this.state === "stroking") {
-        // still writing — push further
         this.scheduleSave();
         return;
       }
@@ -797,6 +937,7 @@ export class PyoInkView extends ItemView {
       // ensure transparent background each frame
       this.ctx.clearRect(0, 0, this.cssW, this.cssH);
       this.engine.draw(this.ctx, this.cssW, this.cssH, this.cacheCanvas, this.cacheValid);
+      this.paintCursor(this.ctx);
     });
   }
 }

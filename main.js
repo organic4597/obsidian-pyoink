@@ -324,9 +324,10 @@ var StrokeEngine = class {
     this.active = null;
     this.lastPressure = 0.5;
     this.sawRealPressure = false;
-    /** Erase gesture in progress */
     this.erasing = false;
     this.eraseDirty = false;
+    /** Snapshot index at erase start — discard if nothing removed */
+    this.eraseUndoPushed = false;
   }
   setSettings(s2) {
     this.settings = s2;
@@ -336,6 +337,12 @@ var StrokeEngine = class {
   }
   isStroking() {
     return this.active !== null || this.erasing;
+  }
+  canUndo() {
+    return !this.isStroking() && this.undoStack.length > 0;
+  }
+  canRedo() {
+    return !this.isStroking() && this.redoStack.length > 0;
   }
   cloneStrokes(list) {
     return list.map((s2) => ({ ...s2, points: s2.points.map((p2) => [...p2]) }));
@@ -382,9 +389,10 @@ var StrokeEngine = class {
       const changed = this.eraseDirty;
       this.erasing = false;
       this.eraseDirty = false;
-      if (!changed && this.undoStack.length) {
-        this.strokes = this.undoStack.pop();
+      if (!changed && this.eraseUndoPushed) {
+        this.undoStack.pop();
       }
+      this.eraseUndoPushed = false;
       return changed;
     }
     if (!this.active) return false;
@@ -395,9 +403,12 @@ var StrokeEngine = class {
   }
   cancel() {
     if (this.erasing) {
-      if (this.undoStack.length) this.strokes = this.undoStack.pop();
+      if (this.eraseUndoPushed && this.undoStack.length) {
+        this.strokes = this.undoStack.pop();
+      }
       this.erasing = false;
       this.eraseDirty = false;
+      this.eraseUndoPushed = false;
     }
     if (this.active) {
       if (this.undoStack.length) this.strokes = this.undoStack.pop();
@@ -409,6 +420,7 @@ var StrokeEngine = class {
       this.pushUndo();
       this.erasing = true;
       this.eraseDirty = false;
+      this.eraseUndoPushed = true;
     }
   }
   eraseAt(x2, y2, radius) {
@@ -431,14 +443,14 @@ var StrokeEngine = class {
     }
   }
   undo() {
-    if (this.active || this.erasing) return false;
+    if (this.isStroking()) return false;
     if (!this.undoStack.length) return false;
     this.redoStack.push(this.cloneStrokes(this.strokes));
     this.strokes = this.undoStack.pop();
     return true;
   }
   redo() {
-    if (this.active || this.erasing) return false;
+    if (this.isStroking()) return false;
     if (!this.redoStack.length) return false;
     this.undoStack.push(this.cloneStrokes(this.strokes));
     this.strokes = this.redoStack.pop();
@@ -449,6 +461,7 @@ var StrokeEngine = class {
     this.active = null;
     this.erasing = false;
     this.eraseDirty = false;
+    this.eraseUndoPushed = false;
     this.undoStack = [];
     this.redoStack = [];
   }
@@ -1026,6 +1039,7 @@ var DEFAULT_SETTINGS = {
   highlighterColor: "#ffe566",
   penWidth: 2.4,
   highlighterWidth: 16,
+  eraserWidth: 28,
   toolCycle: ["pen", "highlighter", "eraser"],
   enableTwoFingerToolCycle: true,
   enablePencilDoubleTapProbe: false,
@@ -1037,8 +1051,8 @@ var DEFAULT_SETTINGS = {
   pfSmoothing: 0.5,
   pfThinning: 0.5,
   pfStreamline: 0.5,
-  // Don't thrash disk while writing — 8s idle or exit
-  debounceMs: 8e3,
+  // Save only after 12s with no writing, or on leave
+  debounceMs: 12e3,
   maxCanvasCssHeight: 8192,
   undoLimit: 40,
   toolbarXPct: 50,
@@ -1053,6 +1067,7 @@ function sanitizeSettings(raw) {
   s2.annotationsFolder = folder.replace(/\/+$/, "");
   s2.penWidth = clamp(Number(s2.penWidth), 0.5, 40);
   s2.highlighterWidth = clamp(Number(s2.highlighterWidth), 2, 80);
+  s2.eraserWidth = clamp(Number(s2.eraserWidth), 8, 120);
   s2.pressureGain = clamp(Number(s2.pressureGain), 0.3, 3);
   s2.pfSmoothing = clamp(Number(s2.pfSmoothing), 0, 0.95);
   s2.pfThinning = clamp(Number(s2.pfThinning), -0.99, 0.99);
@@ -1086,6 +1101,11 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.cacheValid = false;
     this.navBtn = null;
     this.dragBound = false;
+    this.cursorX = -1;
+    this.cursorY = -1;
+    this.cursorOn = false;
+    this.undoBtn = null;
+    this.redoBtn = null;
     this.saveTimer = null;
     this.raf = 0;
     this.needRedraw = false;
@@ -1214,20 +1234,33 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.navBtn.title = "Navigate (links)";
     (0, import_obsidian2.setIcon)(this.navBtn, "mouse-pointer-click");
     this.navBtn.onclick = () => this.setNavigate(!this.gestures.navigateMode);
-    const undo = tools.createEl("button");
-    undo.title = "Undo";
-    (0, import_obsidian2.setIcon)(undo, "undo-2");
-    undo.onclick = () => {
+    this.undoBtn = tools.createEl("button");
+    this.undoBtn.title = "Undo";
+    (0, import_obsidian2.setIcon)(this.undoBtn, "undo-2");
+    this.undoBtn.onclick = () => {
       this.finishStrokeIfNeeded();
       if (this.engine.undo()) {
         this.cacheValid = false;
         this.markDirty();
         this.requestRedraw();
+        this.syncToolbar();
+      }
+    };
+    this.redoBtn = tools.createEl("button");
+    this.redoBtn.title = "Redo";
+    (0, import_obsidian2.setIcon)(this.redoBtn, "redo-2");
+    this.redoBtn.onclick = () => {
+      this.finishStrokeIfNeeded();
+      if (this.engine.redo()) {
+        this.cacheValid = false;
+        this.markDirty();
+        this.requestRedraw();
+        this.syncToolbar();
       }
     };
     const exit = tools.createEl("button");
-    exit.title = "Save & exit";
-    (0, import_obsidian2.setIcon)(exit, "check");
+    exit.title = "Leave (save on exit)";
+    (0, import_obsidian2.setIcon)(exit, "log-out");
     exit.onclick = async () => {
       const ok = await this.flushSave();
       if (!ok && this.dirty) {
@@ -1236,22 +1269,9 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       if (this.file) await this.leaf.openFile(this.file);
     };
     this.colorRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
+    this.widthRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
     this.rebuildColorRow();
-    const widths = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
-    for (const [label, penW, hiW] of [
-      ["S", 1.6, 10],
-      ["M", 2.4, 16],
-      ["L", 4, 24]
-    ]) {
-      const b2 = widths.createEl("button", { text: label, cls: "pyoink-width-btn" });
-      b2.dataset.w = label;
-      b2.onclick = () => {
-        this.plugin.settings.penWidth = penW;
-        this.plugin.settings.highlighterWidth = hiW;
-        void this.plugin.saveSettings();
-        this.syncToolbar();
-      };
-    }
+    this.rebuildWidthRow();
     this.syncToolbar();
   }
   iconBtn(parent, tool, icon, title) {
@@ -1264,13 +1284,15 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       this.setTool(tool);
       this.setNavigate(false);
       this.rebuildColorRow();
+      this.rebuildWidthRow();
       this.syncToolbar();
+      this.updateCanvasCursor();
     };
   }
   rebuildColorRow() {
     this.colorRowEl.empty();
     const tool = this.gestures.getTool();
-    if (tool === "eraser") {
+    if (tool === "eraser" || this.gestures.navigateMode) {
       this.colorRowEl.style.display = "none";
       return;
     }
@@ -1281,13 +1303,42 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       const b2 = this.colorRowEl.createEl("button", { cls: "pyoink-swatch" });
       b2.style.background = c2;
       b2.title = c2;
-      if (c2.toLowerCase() === cur.toLowerCase()) b2.classList.add("is-active");
+      if (c2.toLowerCase() === String(cur).toLowerCase()) b2.classList.add("is-active");
       b2.onclick = () => {
         this.finishStrokeIfNeeded();
         if (tool === "highlighter") this.plugin.settings.highlighterColor = c2;
         else this.plugin.settings.penColor = c2;
         void this.plugin.saveSettings();
         this.rebuildColorRow();
+        this.updateCanvasCursor();
+      };
+    }
+  }
+  rebuildWidthRow() {
+    this.widthRowEl.empty();
+    if (this.gestures.navigateMode) {
+      this.widthRowEl.style.display = "none";
+      return;
+    }
+    this.widthRowEl.style.display = "";
+    const tool = this.gestures.getTool();
+    const presets = tool === "eraser" ? [["S", 16], ["M", 28], ["L", 48]] : tool === "highlighter" ? [["S", 10], ["M", 16], ["L", 28]] : [["S", 1.6], ["M", 2.4], ["L", 4.5]];
+    const cur = tool === "eraser" ? this.plugin.settings.eraserWidth : tool === "highlighter" ? this.plugin.settings.highlighterWidth : this.plugin.settings.penWidth;
+    for (const [label, w2] of presets) {
+      const b2 = this.widthRowEl.createEl("button", { text: label, cls: "pyoink-width-btn" });
+      b2.dataset.w = label;
+      const dists = presets.map((p2) => Math.abs(p2[1] - cur));
+      const best = dists.indexOf(Math.min(...dists));
+      if (presets[best][0] === label) b2.classList.add("is-active");
+      b2.onclick = () => {
+        this.finishStrokeIfNeeded();
+        if (tool === "eraser") this.plugin.settings.eraserWidth = w2;
+        else if (tool === "highlighter") this.plugin.settings.highlighterWidth = w2;
+        else this.plugin.settings.penWidth = w2;
+        void this.plugin.saveSettings();
+        this.rebuildWidthRow();
+        this.updateCanvasCursor();
+        this.requestRedraw();
       };
     }
   }
@@ -1299,6 +1350,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.cacheValid = false;
     if (changed) this.markDirty();
     this.requestRedraw();
+    this.syncToolbar();
   }
   applyToolbarPos() {
     const x2 = this.plugin.settings.toolbarXPct ?? 50;
@@ -1351,11 +1403,15 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.gestures.navigateMode = on;
     this.pageEl.classList.toggle("is-navigate", on);
     this.canvas.classList.toggle("is-pass-through", on);
+    this.rebuildColorRow();
+    this.rebuildWidthRow();
     this.syncToolbar();
+    this.updateCanvasCursor();
   }
   setTool(t2) {
     this.gestures.setTool(t2);
     this.syncToolbar();
+    this.updateCanvasCursor();
   }
   cycleTool() {
     this.finishStrokeIfNeeded();
@@ -1365,6 +1421,65 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     const i2 = order.indexOf(cur);
     this.setTool(order[(i2 + 1) % order.length]);
     this.rebuildColorRow();
+    this.rebuildWidthRow();
+  }
+  currentBrushRadius() {
+    const tool = this.gestures.getTool();
+    if (tool === "eraser") return this.plugin.settings.eraserWidth / 2;
+    if (tool === "highlighter") return this.plugin.settings.highlighterWidth / 2;
+    return Math.max(4, this.plugin.settings.penWidth * 2);
+  }
+  updateCanvasCursor() {
+    if (this.gestures.navigateMode) {
+      this.canvas.style.cursor = "pointer";
+      return;
+    }
+    this.canvas.style.cursor = "none";
+  }
+  paintCursor(ctx) {
+    if (!this.cursorOn || this.gestures.navigateMode) return;
+    if (this.cursorX < 0 || this.cursorY < 0) return;
+    const r2 = this.currentBrushRadius();
+    const tool = this.gestures.getTool();
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(this.cursorX, this.cursorY, r2, 0, Math.PI * 2);
+    if (tool === "eraser") {
+      ctx.strokeStyle = "rgba(220, 50, 50, 0.95)";
+      ctx.fillStyle = "rgba(220, 50, 50, 0.12)";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 3]);
+    } else if (tool === "highlighter") {
+      ctx.strokeStyle = this.plugin.settings.highlighterColor;
+      ctx.fillStyle = this.hexAlpha(this.plugin.settings.highlighterColor, 0.25);
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+    } else {
+      ctx.strokeStyle = this.plugin.settings.penColor;
+      ctx.fillStyle = this.hexAlpha(this.plugin.settings.penColor, 0.18);
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+    }
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.setLineDash([]);
+    ctx.fillStyle = tool === "eraser" ? "rgba(220,50,50,0.9)" : this.plugin.settings.penColor;
+    if (tool === "highlighter") ctx.fillStyle = this.plugin.settings.highlighterColor;
+    ctx.arc(this.cursorX, this.cursorY, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  hexAlpha(hex, a2) {
+    const h2 = hex.replace("#", "");
+    if (h2.length !== 6) return `rgba(0,0,0,${a2})`;
+    const r2 = parseInt(h2.slice(0, 2), 16);
+    const g2 = parseInt(h2.slice(2, 4), 16);
+    const b2 = parseInt(h2.slice(4, 6), 16);
+    return `rgba(${r2},${g2},${b2},${a2})`;
+  }
+  eraserRadius() {
+    return this.plugin.settings.eraserWidth || 28;
   }
   syncToolbar() {
     const t2 = this.gestures.getTool();
@@ -1375,13 +1490,8 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       );
     });
     if (this.navBtn) this.navBtn.classList.toggle("is-active", this.gestures.navigateMode);
-    const pw = this.plugin.settings.penWidth;
-    this.toolbarEl.querySelectorAll("button[data-w]").forEach((el) => {
-      const b2 = el;
-      const lab = b2.dataset.w;
-      const active = lab === "S" && pw <= 2 || lab === "M" && pw > 2 && pw < 3.5 || lab === "L" && pw >= 3.5;
-      b2.classList.toggle("is-active", active);
-    });
+    if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
+    if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
   }
   bindKeys() {
     this.rootEl.tabIndex = 0;
@@ -1395,16 +1505,29 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         ev.preventDefault();
       }
       if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "z") {
+        this.finishStrokeIfNeeded();
         if (ev.shiftKey) {
           if (this.engine.redo()) {
             this.cacheValid = false;
             this.markDirty();
             this.requestRedraw();
+            this.syncToolbar();
           }
         } else if (this.engine.undo()) {
           this.cacheValid = false;
           this.markDirty();
           this.requestRedraw();
+          this.syncToolbar();
+        }
+        ev.preventDefault();
+      }
+      if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "y") {
+        this.finishStrokeIfNeeded();
+        if (this.engine.redo()) {
+          this.cacheValid = false;
+          this.markDirty();
+          this.requestRedraw();
+          this.syncToolbar();
         }
         ev.preventDefault();
       }
@@ -1466,6 +1589,22 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       },
       { passive: false }
     );
+    c2.addEventListener("pointermove", (ev) => {
+      const rect = c2.getBoundingClientRect();
+      this.cursorX = ev.clientX - rect.left;
+      this.cursorY = ev.clientY - rect.top;
+      this.cursorOn = true;
+      if (!this.gestures.isDrawing() && this.state === "ready") this.requestRedraw();
+    }, { capture: true });
+    c2.addEventListener("pointerenter", () => {
+      this.cursorOn = true;
+      this.updateCanvasCursor();
+    });
+    c2.addEventListener("pointerleave", () => {
+      this.cursorOn = false;
+      this.requestRedraw();
+    });
+    this.updateCanvasCursor();
   }
   handleGesture(action, ev, rect) {
     switch (action.type) {
@@ -1522,13 +1661,13 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         const sample = this.gestures.sampleFromEvent(ev, rect);
         if (action.type === "erase-start" || this.gestures.getTool() === "eraser") {
           this.engine.beginErase();
-          this.engine.eraseAt(sample.x, sample.y, 24);
+          this.engine.eraseAt(sample.x, sample.y, this.eraserRadius());
           this.cacheValid = false;
         } else {
           const tool = this.gestures.getTool();
           if (tool === "eraser") {
             this.engine.beginErase();
-            this.engine.eraseAt(sample.x, sample.y, 24);
+            this.engine.eraseAt(sample.x, sample.y, this.eraserRadius());
             this.cacheValid = false;
           } else {
             const color = tool === "highlighter" ? this.plugin.settings.highlighterColor : this.plugin.settings.penColor;
@@ -1547,7 +1686,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       }
       case "draw-move": {
         if (this.gestures.getTool() === "eraser" || this.engine.getActive() === null) {
-          for (const s2 of action.samples) this.engine.eraseAt(s2.x, s2.y, 24);
+          for (const s2 of action.samples) this.engine.eraseAt(s2.x, s2.y, this.eraserRadius());
           this.cacheValid = false;
         } else {
           this.engine.extend(action.samples);
@@ -1561,6 +1700,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         this.state = "ready";
         this.cacheValid = false;
         if (changed) this.markDirty();
+        this.syncToolbar();
         this.requestRedraw();
         try {
           this.canvas.releasePointerCapture(ev.pointerId);
@@ -1599,7 +1739,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.scheduleSave();
   }
   scheduleSave() {
-    const ms = Math.max(3e3, this.plugin.settings.debounceMs || 8e3);
+    const ms = Math.max(12e3, this.plugin.settings.debounceMs || 12e3);
     if (this.saveTimer) window.clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => {
       if (this.engine.isStroking() || this.state === "stroking") {
@@ -1738,6 +1878,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       }
       this.ctx.clearRect(0, 0, this.cssW, this.cssH);
       this.engine.draw(this.ctx, this.cssW, this.cssH, this.cacheCanvas, this.cacheValid);
+      this.paintCursor(this.ctx);
     });
   }
 };
@@ -1809,8 +1950,8 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Idle save delay (ms)").setDesc("Higher = less lag while writing. Always saves on exit.").addSlider(
-      (s2) => s2.setLimits(2e3, 2e4, 500).setValue(this.plugin.settings.debounceMs).setDynamicTooltip().onChange(async (v2) => {
+    new import_obsidian3.Setting(containerEl).setName("Idle save delay (ms)").setDesc("Default 12000ms (12s) with no writing. Always saves when leaving PyoInk.").addSlider(
+      (s2) => s2.setLimits(12e3, 3e4, 1e3).setValue(this.plugin.settings.debounceMs).setDynamicTooltip().onChange(async (v2) => {
         this.plugin.settings.debounceMs = v2;
         await this.plugin.saveSettings();
       })
