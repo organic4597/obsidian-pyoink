@@ -1,6 +1,6 @@
 {
   "name": "pyoink",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "Obsidian plugin: GoodNotes-feel ink overlay",
   "main": "main.js",

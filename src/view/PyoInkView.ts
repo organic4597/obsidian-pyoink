@@ -4,7 +4,6 @@ import {
   Notice,
   TFile,
   WorkspaceLeaf,
-  setIcon,
 } from "obsidian";
 import type PyoInkPlugin from "../../main";
 import { StrokeEngine } from "../engine/StrokeEngine";
@@ -15,6 +14,25 @@ import { InkStore } from "../store/InkStore";
 import type { InkTool } from "../util/settings";
 import { HI_COLORS, PEN_COLORS, type FingerAction } from "../util/settings";
 import { inkLog } from "../util/errors";
+
+/** 7-step brush widths per tool (index 0–6). */
+const WIDTH_STEPS: Record<"pen" | "highlighter" | "eraser", number[]> = {
+  pen: [1.0, 1.6, 2.2, 3.0, 4.0, 5.5, 8.0],
+  highlighter: [8, 12, 16, 20, 26, 34, 44],
+  eraser: [12, 18, 24, 32, 42, 56, 72],
+};
+
+/** Built-in SVGs — setIcon lucide names often invisible/missing in some themes. */
+const TOOLBAR_SVG: Record<string, string> = {
+  pen: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>`,
+  highlighter: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/></svg>`,
+  eraser: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg>`,
+  nav: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4l7.07 17 2.51-7.39L21 11.07z"/></svg>`,
+  undo: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6.7 3L3 13"/></svg>`,
+  redo: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6.7 3L21 13"/></svg>`,
+  exit: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>`,
+  check: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>`,
+};
 
 export const VIEW_TYPE_PYOINK = "pyoink-view";
 
@@ -49,11 +67,14 @@ export class PyoInkView extends ItemView {
   private cacheValid = false;
   private toolbarEl!: HTMLElement;
   private colorRowEl!: HTMLElement;
+  private rgbRowEl!: HTMLElement;
   private navBtn: HTMLButtonElement | null = null;
   private dragBound = false;
   private cursorX = -1;
   private cursorY = -1;
   private cursorOn = false;
+  /** Apple Pencil / pen hover pressure (0 when unknown). */
+  private cursorPressure = 0.5;
   private undoBtn: HTMLButtonElement | null = null;
   private redoBtn: HTMLButtonElement | null = null;
   private widthRowEl!: HTMLElement;
@@ -202,18 +223,18 @@ export class PyoInkView extends ItemView {
     this.bindToolbarDrag(drag);
 
     const tools = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
-    this.iconBtn(tools, "pen", "pencil", "Pen");
+    this.iconBtn(tools, "pen", "pen", "Pen");
     this.iconBtn(tools, "highlighter", "highlighter", "Highlighter");
     this.iconBtn(tools, "eraser", "eraser", "Eraser");
 
-    this.navBtn = tools.createEl("button");
+    this.navBtn = tools.createEl("button", { cls: "pyoink-tb-icon" });
     this.navBtn.title = "Navigate (links)";
-    setIcon(this.navBtn, "mouse-pointer-click");
+    this.setSvgIcon(this.navBtn, "nav");
     this.navBtn.onclick = () => this.setNavigate(!this.gestures.navigateMode);
 
-    this.undoBtn = tools.createEl("button");
+    this.undoBtn = tools.createEl("button", { cls: "pyoink-tb-icon" });
     this.undoBtn.title = "Undo";
-    setIcon(this.undoBtn, "undo-2");
+    this.setSvgIcon(this.undoBtn, "undo");
     this.undoBtn.onclick = () => {
       this.finishStrokeIfNeeded();
       if (this.engine.undo()) {
@@ -224,9 +245,9 @@ export class PyoInkView extends ItemView {
       }
     };
 
-    this.redoBtn = tools.createEl("button");
+    this.redoBtn = tools.createEl("button", { cls: "pyoink-tb-icon" });
     this.redoBtn.title = "Redo";
-    setIcon(this.redoBtn, "redo-2");
+    this.setSvgIcon(this.redoBtn, "redo");
     this.redoBtn.onclick = () => {
       this.finishStrokeIfNeeded();
       if (this.engine.redo()) {
@@ -237,9 +258,9 @@ export class PyoInkView extends ItemView {
       }
     };
 
-    const exit = tools.createEl("button");
+    const exit = tools.createEl("button", { cls: "pyoink-tb-icon" });
     exit.title = "Leave (save on exit)";
-    setIcon(exit, "log-out");
+    this.setSvgIcon(exit, "exit");
     exit.onclick = async () => {
       const ok = await this.flushSave();
       if (!ok && this.dirty) {
@@ -248,27 +269,86 @@ export class PyoInkView extends ItemView {
       if (this.file) await this.leaf.openFile(this.file);
     };
 
-    this.colorRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
-    this.widthRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
+    this.colorRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-color-row" });
+    this.rgbRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-rgb-row" });
+    this.widthRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-width-row" });
     this.rebuildColorRow();
+    this.rebuildRgbRow();
     this.rebuildWidthRow();
     this.syncToolbar();
   }
 
-  private iconBtn(parent: HTMLElement, tool: InkTool, icon: string, title: string) {
-    const b = parent.createEl("button");
+  private setSvgIcon(el: HTMLElement, key: string) {
+    el.empty();
+    el.addClass("pyoink-tb-icon");
+    const wrap = el.createSpan({ cls: "pyoink-icon" });
+    wrap.innerHTML = TOOLBAR_SVG[key] || TOOLBAR_SVG.pen;
+  }
+
+  private iconBtn(parent: HTMLElement, tool: InkTool, iconKey: string, title: string) {
+    const b = parent.createEl("button", { cls: "pyoink-tb-icon" });
     b.dataset.tool = tool;
     b.title = title;
-    setIcon(b, icon);
+    this.setSvgIcon(b, iconKey);
     b.onclick = () => {
       this.finishStrokeIfNeeded();
       this.setTool(tool);
       this.setNavigate(false);
       this.rebuildColorRow();
+      this.rebuildRgbRow();
       this.rebuildWidthRow();
       this.syncToolbar();
       this.updateCanvasCursor();
+      this.requestRedraw();
     };
+  }
+
+  private currentToolColor(): string {
+    const tool = this.gestures.getTool();
+    if (tool === "highlighter") return this.plugin.settings.highlighterColor;
+    return this.plugin.settings.penColor;
+  }
+
+  /** @param fromRgb when true, do not rebuild RGB row (sliders are mid-drag). */
+  private setToolColor(hex: string, fromRgb = false) {
+    const h = this.normalizeHex(hex);
+    if (!h) return;
+    const tool = this.gestures.getTool();
+    if (tool === "highlighter") this.plugin.settings.highlighterColor = h;
+    else this.plugin.settings.penColor = h;
+    void this.plugin.saveSettings();
+    this.rebuildColorRow();
+    if (!fromRgb) this.rebuildRgbRow();
+    this.updateCanvasCursor();
+    this.requestRedraw();
+  }
+
+  private normalizeHex(raw: string): string | null {
+    let s = String(raw || "").trim();
+    if (!s.startsWith("#")) s = "#" + s;
+    if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
+    if (/^#[0-9a-fA-F]{3}$/.test(s)) {
+      const r = s[1],
+        g = s[2],
+        b = s[3];
+      return (`#${r}${r}${g}${g}${b}${b}`).toLowerCase();
+    }
+    return null;
+  }
+
+  private hexToRgb(hex: string): { r: number; g: number; b: number } {
+    const h = this.normalizeHex(hex) || "#1a1a1a";
+    return {
+      r: parseInt(h.slice(1, 3), 16),
+      g: parseInt(h.slice(3, 5), 16),
+      b: parseInt(h.slice(5, 7), 16),
+    };
+  }
+
+  private rgbToHex(r: number, g: number, b: number): string {
+    const c = (n: number) =>
+      Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
+    return `#${c(r)}${c(g)}${c(b)}`;
   }
 
   private rebuildColorRow() {
@@ -280,24 +360,101 @@ export class PyoInkView extends ItemView {
     }
     this.colorRowEl.style.display = "";
     const colors = tool === "highlighter" ? HI_COLORS : PEN_COLORS;
-    const cur =
-      tool === "highlighter"
-        ? this.plugin.settings.highlighterColor
-        : this.plugin.settings.penColor;
+    const cur = this.currentToolColor().toLowerCase();
     for (const c of colors) {
       const b = this.colorRowEl.createEl("button", { cls: "pyoink-swatch" });
       b.style.background = c;
       b.title = c;
-      if (c.toLowerCase() === String(cur).toLowerCase()) b.classList.add("is-active");
+      const active = c.toLowerCase() === cur;
+      if (active) {
+        b.classList.add("is-active");
+        const mark = b.createSpan({ cls: "pyoink-swatch-check" });
+        mark.innerHTML = TOOLBAR_SVG.check;
+      }
       b.onclick = () => {
         this.finishStrokeIfNeeded();
-        if (tool === "highlighter") this.plugin.settings.highlighterColor = c;
-        else this.plugin.settings.penColor = c;
-        void this.plugin.saveSettings();
-        this.rebuildColorRow();
-        this.updateCanvasCursor();
+        this.setToolColor(c);
       };
     }
+  }
+
+  private rebuildRgbRow() {
+    this.rgbRowEl.empty();
+    const tool = this.gestures.getTool();
+    if (tool === "eraser" || this.gestures.navigateMode) {
+      this.rgbRowEl.style.display = "none";
+      return;
+    }
+    this.rgbRowEl.style.display = "";
+    const { r, g, b } = this.hexToRgb(this.currentToolColor());
+    const preview = this.rgbRowEl.createDiv({ cls: "pyoink-rgb-preview" });
+    preview.style.background = this.currentToolColor();
+
+    const mk = (label: string, value: number, onChange: (n: number) => void) => {
+      const cell = this.rgbRowEl.createDiv({ cls: "pyoink-rgb-cell" });
+      cell.createSpan({ text: label, cls: "pyoink-rgb-label" });
+      const range = cell.createEl("input", { type: "range", cls: "pyoink-rgb-slider" });
+      range.min = "0";
+      range.max = "255";
+      range.step = "1";
+      range.value = String(value);
+      const num = cell.createEl("input", { type: "number", cls: "pyoink-rgb-num" });
+      num.min = "0";
+      num.max = "255";
+      num.step = "1";
+      num.value = String(value);
+      const sync = (n: number) => {
+        const v = Math.max(0, Math.min(255, Math.round(n)));
+        range.value = String(v);
+        num.value = String(v);
+        onChange(v);
+      };
+      range.oninput = () => sync(Number(range.value));
+      num.onchange = () => sync(Number(num.value));
+      return { range, num, sync };
+    };
+
+    let rr = r,
+      gg = g,
+      bb = b;
+    const apply = () => {
+      const hex = this.rgbToHex(rr, gg, bb);
+      preview.style.background = hex;
+      this.finishStrokeIfNeeded();
+      this.setToolColor(hex, true);
+    };
+    mk("R", r, (n) => {
+      rr = n;
+      apply();
+    });
+    mk("G", g, (n) => {
+      gg = n;
+      apply();
+    });
+    mk("B", b, (n) => {
+      bb = n;
+      apply();
+    });
+  }
+
+  private widthStepsForTool(tool: InkTool): number[] {
+    if (tool === "eraser") return WIDTH_STEPS.eraser;
+    if (tool === "highlighter") return WIDTH_STEPS.highlighter;
+    return WIDTH_STEPS.pen;
+  }
+
+  private nearestWidthStep(tool: InkTool, cur: number): number {
+    const steps = this.widthStepsForTool(tool);
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < steps.length; i++) {
+      const d = Math.abs(steps[i] - cur);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    return best;
   }
 
   private rebuildWidthRow() {
@@ -308,36 +465,42 @@ export class PyoInkView extends ItemView {
     }
     this.widthRowEl.style.display = "";
     const tool = this.gestures.getTool();
-    const presets =
-      tool === "eraser"
-        ? ([["S", 16], ["M", 28], ["L", 48]] as const)
-        : tool === "highlighter"
-          ? ([["S", 10], ["M", 16], ["L", 28]] as const)
-          : ([["S", 1.6], ["M", 2.4], ["L", 4.5]] as const);
+    const steps = this.widthStepsForTool(tool);
     const cur =
       tool === "eraser"
         ? this.plugin.settings.eraserWidth
         : tool === "highlighter"
           ? this.plugin.settings.highlighterWidth
           : this.plugin.settings.penWidth;
-    for (const [label, w] of presets) {
-      const b = this.widthRowEl.createEl("button", { text: label, cls: "pyoink-width-btn" });
-      b.dataset.w = label;
-      // nearest preset active
-      const dists = presets.map((p) => Math.abs(p[1] - cur));
-      const best = dists.indexOf(Math.min(...dists));
-      if (presets[best][0] === label) b.classList.add("is-active");
-      b.onclick = () => {
-        this.finishStrokeIfNeeded();
-        if (tool === "eraser") this.plugin.settings.eraserWidth = w;
-        else if (tool === "highlighter") this.plugin.settings.highlighterWidth = w;
-        else this.plugin.settings.penWidth = w;
-        void this.plugin.saveSettings();
-        this.rebuildWidthRow();
-        this.updateCanvasCursor();
-        this.requestRedraw();
-      };
-    }
+    const idx = this.nearestWidthStep(tool, cur);
+
+    this.widthRowEl.createSpan({ text: "Size", cls: "pyoink-width-label" });
+    const range = this.widthRowEl.createEl("input", {
+      type: "range",
+      cls: "pyoink-width-slider",
+    });
+    range.min = "0";
+    range.max = String(steps.length - 1);
+    range.step = "1";
+    range.value = String(idx);
+    range.title = "Stroke width (7 steps)";
+    const val = this.widthRowEl.createSpan({
+      text: `${idx + 1}/7`,
+      cls: "pyoink-width-val",
+    });
+    const applyW = (i: number) => {
+      const ii = Math.max(0, Math.min(steps.length - 1, Math.round(i)));
+      const w = steps[ii];
+      this.finishStrokeIfNeeded();
+      if (tool === "eraser") this.plugin.settings.eraserWidth = w;
+      else if (tool === "highlighter") this.plugin.settings.highlighterWidth = w;
+      else this.plugin.settings.penWidth = w;
+      void this.plugin.saveSettings();
+      val.setText(`${ii + 1}/7`);
+      this.updateCanvasCursor();
+      this.requestRedraw();
+    };
+    range.oninput = () => applyW(Number(range.value));
   }
 
   private finishStrokeIfNeeded() {
@@ -406,9 +569,11 @@ export class PyoInkView extends ItemView {
     this.pageEl.classList.toggle("is-navigate", on);
     this.canvas.classList.toggle("is-pass-through", on);
     this.rebuildColorRow();
+    this.rebuildRgbRow();
     this.rebuildWidthRow();
     this.syncToolbar();
     this.updateCanvasCursor();
+    this.requestRedraw();
   }
 
   setTool(t: InkTool) {
@@ -425,14 +590,70 @@ export class PyoInkView extends ItemView {
     const i = order.indexOf(cur);
     this.setTool(order[(i + 1) % order.length]);
     this.rebuildColorRow();
+    this.rebuildRgbRow();
     this.rebuildWidthRow();
+    this.requestRedraw();
+  }
+
+  private runFingerAction(action: FingerAction | "cycle_tool") {
+    const a = action === "cycle_tool" ? "cycle_tool" : action;
+    switch (a) {
+      case "none":
+        return;
+      case "cycle_tool":
+        this.cycleTool();
+        return;
+      case "undo":
+        this.finishStrokeIfNeeded();
+        if (this.engine.undo()) {
+          this.cacheValid = false;
+          this.markDirty();
+          this.requestRedraw();
+          this.syncToolbar();
+        }
+        return;
+      case "redo":
+        this.finishStrokeIfNeeded();
+        if (this.engine.redo()) {
+          this.cacheValid = false;
+          this.markDirty();
+          this.requestRedraw();
+          this.syncToolbar();
+        }
+        return;
+      case "toggle_nav":
+        this.setNavigate(!this.gestures.navigateMode);
+        return;
+      case "pen":
+      case "highlighter":
+      case "eraser":
+        this.finishStrokeIfNeeded();
+        this.setNavigate(false);
+        this.setTool(a);
+        this.rebuildColorRow();
+        this.rebuildRgbRow();
+        this.rebuildWidthRow();
+        this.syncToolbar();
+        this.requestRedraw();
+        return;
+      case "exit":
+        void (async () => {
+          const ok = await this.flushSave();
+          if (!ok && this.dirty) {
+            if (!confirm("PyoInk: save failed. Exit anyway?")) return;
+          }
+          if (this.file) await this.leaf.openFile(this.file);
+        })();
+        return;
+    }
   }
 
   private currentBrushRadius(): number {
     const tool = this.gestures.getTool();
-    if (tool === "eraser") return this.plugin.settings.eraserWidth / 2;
-    if (tool === "highlighter") return this.plugin.settings.highlighterWidth / 2;
-    return Math.max(4, this.plugin.settings.penWidth * 2);
+    // Match on-canvas feel: radius ≈ half brush size (pen uses size as stroke diam approx)
+    if (tool === "eraser") return Math.max(6, this.plugin.settings.eraserWidth / 2);
+    if (tool === "highlighter") return Math.max(5, this.plugin.settings.highlighterWidth / 2);
+    return Math.max(3, this.plugin.settings.penWidth * 1.35);
   }
 
   private updateCanvasCursor() {
@@ -440,42 +661,88 @@ export class PyoInkView extends ItemView {
       this.canvas.style.cursor = "pointer";
       return;
     }
-    // custom ring drawn on canvas
+    // custom ring drawn on canvas (Apple Pencil hover + mouse)
     this.canvas.style.cursor = "none";
   }
 
+  /**
+   * Hover / tip preview — high-contrast so it stays visible on light & dark notes.
+   * Outer halo (white+dark) + fill matching tool color.
+   */
   private paintCursor(ctx: CanvasRenderingContext2D) {
     if (!this.cursorOn || this.gestures.navigateMode) return;
     if (this.cursorX < 0 || this.cursorY < 0) return;
     const r = this.currentBrushRadius();
     const tool = this.gestures.getTool();
+    const x = this.cursorX;
+    const y = this.cursorY;
+    const ink =
+      tool === "eraser"
+        ? "#dc3232"
+        : tool === "highlighter"
+          ? this.plugin.settings.highlighterColor
+          : this.plugin.settings.penColor;
+
     ctx.save();
+    // outer contrast rings (always visible)
     ctx.beginPath();
-    ctx.arc(this.cursorX, this.cursorY, r, 0, Math.PI * 2);
+    ctx.arc(x, y, r + 2.5, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,255,255,0.92)";
+    ctx.lineWidth = 3;
+    ctx.setLineDash([]);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x, y, r + 2.5, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(0,0,0,0.55)";
+    ctx.lineWidth = 1.25;
+    ctx.stroke();
+
+    // ink fill + dashed ring for eraser
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
     if (tool === "eraser") {
+      ctx.fillStyle = "rgba(220, 50, 50, 0.14)";
       ctx.strokeStyle = "rgba(220, 50, 50, 0.95)";
-      ctx.fillStyle = "rgba(220, 50, 50, 0.12)";
       ctx.lineWidth = 2;
       ctx.setLineDash([4, 3]);
     } else if (tool === "highlighter") {
-      ctx.strokeStyle = this.plugin.settings.highlighterColor;
-      ctx.fillStyle = this.hexAlpha(this.plugin.settings.highlighterColor, 0.25);
-      ctx.lineWidth = 1.5;
+      ctx.fillStyle = this.hexAlpha(ink, 0.28);
+      ctx.strokeStyle = ink;
+      ctx.lineWidth = 2;
       ctx.setLineDash([]);
     } else {
-      ctx.strokeStyle = this.plugin.settings.penColor;
-      ctx.fillStyle = this.hexAlpha(this.plugin.settings.penColor, 0.18);
-      ctx.lineWidth = 1.5;
+      ctx.fillStyle = this.hexAlpha(ink, 0.22);
+      ctx.strokeStyle = ink;
+      ctx.lineWidth = 2;
       ctx.setLineDash([]);
     }
     ctx.fill();
     ctx.stroke();
-    // center dot
-    ctx.beginPath();
+
+    // crosshair center (where tip lands)
     ctx.setLineDash([]);
-    ctx.fillStyle = tool === "eraser" ? "rgba(220,50,50,0.9)" : this.plugin.settings.penColor;
-    if (tool === "highlighter") ctx.fillStyle = this.plugin.settings.highlighterColor;
-    ctx.arc(this.cursorX, this.cursorY, 1.5, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,255,255,0.95)";
+    ctx.lineWidth = 2.5;
+    const c = Math.min(4, r * 0.45);
+    ctx.beginPath();
+    ctx.moveTo(x - c, y);
+    ctx.lineTo(x + c, y);
+    ctx.moveTo(x, y - c);
+    ctx.lineTo(x, y + c);
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(0,0,0,0.7)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x - c, y);
+    ctx.lineTo(x + c, y);
+    ctx.moveTo(x, y - c);
+    ctx.lineTo(x, y + c);
+    ctx.stroke();
+
+    // center ink dot
+    ctx.beginPath();
+    ctx.fillStyle = ink;
+    ctx.arc(x, y, 1.75, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }
@@ -610,22 +877,55 @@ export class PyoInkView extends ItemView {
       { passive: false },
     );
 
-    c.addEventListener("pointermove", (ev) => {
-      // hover preview (also fires while drawing)
+    // Hover / tip preview (Apple Pencil hover + mouse). Keep high-freq updates.
+    const updateHover = (ev: PointerEvent) => {
+      if (this.dragBound) return;
+      // Only pen/mouse drive the ink preview ring (not multi-touch palms)
+      if (ev.pointerType === "touch" && this.plugin.settings.penOnlyInk !== false) {
+        return;
+      }
       const rect = c.getBoundingClientRect();
       this.cursorX = ev.clientX - rect.left;
       this.cursorY = ev.clientY - rect.top;
       this.cursorOn = true;
-      if (!this.gestures.isDrawing() && this.state === "ready") this.requestRedraw();
-    }, { capture: true });
-    c.addEventListener("pointerenter", () => {
-      this.cursorOn = true;
-      this.updateCanvasCursor();
-    });
-    c.addEventListener("pointerleave", () => {
-      this.cursorOn = false;
-      this.requestRedraw();
-    });
+      if (typeof ev.pressure === "number" && ev.pressure > 0) {
+        this.cursorPressure = ev.pressure;
+      }
+      // Hover when buttons===0; also keep ring while drawing
+      if (this.state === "ready" || this.state === "stroking") this.requestRedraw();
+    };
+    c.addEventListener("pointermove", updateHover, { capture: true, passive: true });
+    // Higher-frequency hover on supporting browsers (Pencil hover)
+    c.addEventListener(
+      "pointerrawupdate" as keyof HTMLElementEventMap,
+      updateHover as EventListener,
+      { capture: true, passive: true },
+    );
+    c.addEventListener(
+      "pointerenter",
+      (ev) => {
+        this.cursorOn = true;
+        updateHover(ev);
+        this.updateCanvasCursor();
+      },
+      { capture: true },
+    );
+    c.addEventListener(
+      "pointerleave",
+      () => {
+        this.cursorOn = false;
+        this.requestRedraw();
+      },
+      { capture: true },
+    );
+    // iPad: pen may enter with pointerover before move
+    c.addEventListener(
+      "pointerover",
+      (ev) => {
+        if (ev.pointerType === "pen" || ev.pointerType === "mouse") updateHover(ev);
+      },
+      { capture: true },
+    );
     this.updateCanvasCursor();
   }
 

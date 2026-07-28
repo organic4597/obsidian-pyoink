@@ -50,6 +50,7 @@
   touch-action: none;
   pointer-events: auto;
   background: transparent;
+  cursor: none;
 }
 
 .pyoink-canvas.is-pass-through {
@@ -68,14 +69,15 @@
   gap: 6px;
   padding: 8px 10px;
   border-radius: 16px;
-  background: color-mix(in srgb, var(--background-secondary) 94%, transparent);
+  background: color-mix(in srgb, var(--background-secondary) 96%, transparent);
   border: 1px solid var(--background-modifier-border);
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22);
   backdrop-filter: blur(10px);
   pointer-events: auto;
-  max-width: min(96vw, 420px);
+  max-width: min(96vw, 440px);
   user-select: none;
   -webkit-user-select: none;
+  color: var(--text-normal);
 }
 
 .pyoink-toolbar.is-dragging {
@@ -114,7 +116,9 @@
   background: var(--text-muted);
 }
 
-.pyoink-toolbar button {
+/* Force icon visibility (theme-independent stroke) */
+.pyoink-toolbar button,
+.pyoink-toolbar .pyoink-tb-icon {
   width: 40px;
   height: 40px;
   min-width: 40px;
@@ -122,55 +126,162 @@
   border-radius: 12px;
   border: none;
   background: transparent;
-  color: var(--text-normal);
+  color: var(--text-normal) !important;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.pyoink-toolbar button svg {
+.pyoink-toolbar button .pyoink-icon,
+.pyoink-toolbar .pyoink-icon {
+  display: inline-flex;
   width: 20px;
   height: 20px;
+  color: inherit;
+}
+
+.pyoink-toolbar button svg,
+.pyoink-toolbar .pyoink-icon svg {
+  width: 20px;
+  height: 20px;
+  stroke: currentColor !important;
+  fill: none !important;
+  color: inherit;
 }
 
 .pyoink-toolbar button.is-active {
   background: var(--interactive-accent);
-  color: var(--text-on-accent);
+  color: var(--text-on-accent, #fff) !important;
 }
 
+.pyoink-toolbar button.is-active svg {
+  stroke: currentColor !important;
+  color: inherit !important;
+}
+
+/* Color swatches — selected = check only (no purple ring) */
 .pyoink-swatch {
+  position: relative;
   width: 28px !important;
   height: 28px !important;
   min-width: 28px !important;
   border-radius: 999px !important;
-  border: 2px solid transparent !important;
+  border: 1px solid rgba(0, 0, 0, 0.18) !important;
   padding: 0 !important;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  overflow: visible;
+  background-clip: padding-box;
 }
 
 .pyoink-swatch.is-active {
-  border-color: var(--text-normal) !important;
-  box-shadow: 0 0 0 2px var(--interactive-accent);
-  background: inherit !important;
-  color: inherit !important;
+  border-color: rgba(0, 0, 0, 0.25) !important;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.15) !important;
+  background-image: none !important;
+  /* do NOT use accent fill — keep the color itself */
+  background-color: inherit !important;
+  color: #fff !important;
 }
 
-.pyoink-width-btn {
-  width: 36px !important;
+.pyoink-swatch-check {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  color: #fff;
+  filter: drop-shadow(0 0 1.5px #000) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85));
+}
+
+.pyoink-swatch-check svg {
+  width: 14px !important;
+  height: 14px !important;
+  stroke: #fff !important;
+  stroke-width: 3 !important;
+}
+
+/* RGB controls */
+.pyoink-rgb-row {
+  gap: 6px !important;
+  width: 100%;
+  justify-content: flex-start !important;
+  flex-wrap: wrap;
+}
+
+.pyoink-rgb-preview {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  flex-shrink: 0;
+}
+
+.pyoink-rgb-cell {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: 1 1 28%;
+  min-width: 90px;
+}
+
+.pyoink-rgb-label {
   font-size: 11px;
   font-weight: 700;
   color: var(--text-muted);
+  width: 12px;
 }
 
-.pyoink-width-btn.is-active {
-  color: var(--text-on-accent);
+.pyoink-rgb-slider {
+  flex: 1;
+  min-width: 48px;
+  height: 18px;
+  accent-color: var(--interactive-accent);
+}
+
+.pyoink-rgb-num {
+  width: 42px !important;
+  min-width: 42px !important;
+  height: 26px;
+  font-size: 11px;
+  padding: 0 4px !important;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  text-align: center;
+}
+
+/* Width 7-step slider */
+.pyoink-width-row {
+  width: 100%;
+  gap: 8px !important;
+  justify-content: stretch !important;
+}
+
+.pyoink-width-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.pyoink-width-slider {
+  flex: 1;
+  min-width: 120px;
+  height: 22px;
+  accent-color: var(--interactive-accent);
+}
+
+.pyoink-width-val {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-normal);
+  min-width: 28px;
+  text-align: right;
 }
 
 .pyoink-toolbar button[disabled] {
   opacity: 0.35;
   pointer-events: none;
-}
-
-.pyoink-canvas {
-  cursor: none;
 }

@@ -1143,6 +1143,21 @@ function sanitizeSettings(raw) {
 }
 
 // src/view/PyoInkView.ts
+var WIDTH_STEPS = {
+  pen: [1, 1.6, 2.2, 3, 4, 5.5, 8],
+  highlighter: [8, 12, 16, 20, 26, 34, 44],
+  eraser: [12, 18, 24, 32, 42, 56, 72]
+};
+var TOOLBAR_SVG = {
+  pen: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>`,
+  highlighter: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/></svg>`,
+  eraser: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg>`,
+  nav: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4l7.07 17 2.51-7.39L21 11.07z"/></svg>`,
+  undo: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6.7 3L3 13"/></svg>`,
+  redo: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6.7 3L21 13"/></svg>`,
+  exit: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>`,
+  check: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>`
+};
 var VIEW_TYPE_PYOINK = "pyoink-view";
 var PyoInkView = class extends import_obsidian2.ItemView {
   constructor(leaf, plugin) {
@@ -1160,6 +1175,8 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.cursorX = -1;
     this.cursorY = -1;
     this.cursorOn = false;
+    /** Apple Pencil / pen hover pressure (0 when unknown). */
+    this.cursorPressure = 0.5;
     this.undoBtn = null;
     this.redoBtn = null;
     this.saveTimer = null;
@@ -1283,16 +1300,16 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     const drag = this.toolbarEl.createDiv({ cls: "pyoink-tb-drag" });
     this.bindToolbarDrag(drag);
     const tools = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
-    this.iconBtn(tools, "pen", "pencil", "Pen");
+    this.iconBtn(tools, "pen", "pen", "Pen");
     this.iconBtn(tools, "highlighter", "highlighter", "Highlighter");
     this.iconBtn(tools, "eraser", "eraser", "Eraser");
-    this.navBtn = tools.createEl("button");
+    this.navBtn = tools.createEl("button", { cls: "pyoink-tb-icon" });
     this.navBtn.title = "Navigate (links)";
-    (0, import_obsidian2.setIcon)(this.navBtn, "mouse-pointer-click");
+    this.setSvgIcon(this.navBtn, "nav");
     this.navBtn.onclick = () => this.setNavigate(!this.gestures.navigateMode);
-    this.undoBtn = tools.createEl("button");
+    this.undoBtn = tools.createEl("button", { cls: "pyoink-tb-icon" });
     this.undoBtn.title = "Undo";
-    (0, import_obsidian2.setIcon)(this.undoBtn, "undo-2");
+    this.setSvgIcon(this.undoBtn, "undo");
     this.undoBtn.onclick = () => {
       this.finishStrokeIfNeeded();
       if (this.engine.undo()) {
@@ -1302,9 +1319,9 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         this.syncToolbar();
       }
     };
-    this.redoBtn = tools.createEl("button");
+    this.redoBtn = tools.createEl("button", { cls: "pyoink-tb-icon" });
     this.redoBtn.title = "Redo";
-    (0, import_obsidian2.setIcon)(this.redoBtn, "redo-2");
+    this.setSvgIcon(this.redoBtn, "redo");
     this.redoBtn.onclick = () => {
       this.finishStrokeIfNeeded();
       if (this.engine.redo()) {
@@ -1314,9 +1331,9 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         this.syncToolbar();
       }
     };
-    const exit = tools.createEl("button");
+    const exit = tools.createEl("button", { cls: "pyoink-tb-icon" });
     exit.title = "Leave (save on exit)";
-    (0, import_obsidian2.setIcon)(exit, "log-out");
+    this.setSvgIcon(exit, "exit");
     exit.onclick = async () => {
       const ok = await this.flushSave();
       if (!ok && this.dirty) {
@@ -1324,26 +1341,76 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       }
       if (this.file) await this.leaf.openFile(this.file);
     };
-    this.colorRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
-    this.widthRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
+    this.colorRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-color-row" });
+    this.rgbRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-rgb-row" });
+    this.widthRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-width-row" });
     this.rebuildColorRow();
+    this.rebuildRgbRow();
     this.rebuildWidthRow();
     this.syncToolbar();
   }
-  iconBtn(parent, tool, icon, title) {
-    const b2 = parent.createEl("button");
+  setSvgIcon(el, key) {
+    el.empty();
+    el.addClass("pyoink-tb-icon");
+    const wrap = el.createSpan({ cls: "pyoink-icon" });
+    wrap.innerHTML = TOOLBAR_SVG[key] || TOOLBAR_SVG.pen;
+  }
+  iconBtn(parent, tool, iconKey, title) {
+    const b2 = parent.createEl("button", { cls: "pyoink-tb-icon" });
     b2.dataset.tool = tool;
     b2.title = title;
-    (0, import_obsidian2.setIcon)(b2, icon);
+    this.setSvgIcon(b2, iconKey);
     b2.onclick = () => {
       this.finishStrokeIfNeeded();
       this.setTool(tool);
       this.setNavigate(false);
       this.rebuildColorRow();
+      this.rebuildRgbRow();
       this.rebuildWidthRow();
       this.syncToolbar();
       this.updateCanvasCursor();
+      this.requestRedraw();
     };
+  }
+  currentToolColor() {
+    const tool = this.gestures.getTool();
+    if (tool === "highlighter") return this.plugin.settings.highlighterColor;
+    return this.plugin.settings.penColor;
+  }
+  /** @param fromRgb when true, do not rebuild RGB row (sliders are mid-drag). */
+  setToolColor(hex, fromRgb = false) {
+    const h2 = this.normalizeHex(hex);
+    if (!h2) return;
+    const tool = this.gestures.getTool();
+    if (tool === "highlighter") this.plugin.settings.highlighterColor = h2;
+    else this.plugin.settings.penColor = h2;
+    void this.plugin.saveSettings();
+    this.rebuildColorRow();
+    if (!fromRgb) this.rebuildRgbRow();
+    this.updateCanvasCursor();
+    this.requestRedraw();
+  }
+  normalizeHex(raw) {
+    let s2 = String(raw || "").trim();
+    if (!s2.startsWith("#")) s2 = "#" + s2;
+    if (/^#[0-9a-fA-F]{6}$/.test(s2)) return s2.toLowerCase();
+    if (/^#[0-9a-fA-F]{3}$/.test(s2)) {
+      const r2 = s2[1], g2 = s2[2], b2 = s2[3];
+      return `#${r2}${r2}${g2}${g2}${b2}${b2}`.toLowerCase();
+    }
+    return null;
+  }
+  hexToRgb(hex) {
+    const h2 = this.normalizeHex(hex) || "#1a1a1a";
+    return {
+      r: parseInt(h2.slice(1, 3), 16),
+      g: parseInt(h2.slice(3, 5), 16),
+      b: parseInt(h2.slice(5, 7), 16)
+    };
+  }
+  rgbToHex(r2, g2, b2) {
+    const c2 = (n2) => Math.max(0, Math.min(255, Math.round(n2))).toString(16).padStart(2, "0");
+    return `#${c2(r2)}${c2(g2)}${c2(b2)}`;
   }
   rebuildColorRow() {
     this.colorRowEl.empty();
@@ -1354,21 +1421,94 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     }
     this.colorRowEl.style.display = "";
     const colors = tool === "highlighter" ? HI_COLORS : PEN_COLORS;
-    const cur = tool === "highlighter" ? this.plugin.settings.highlighterColor : this.plugin.settings.penColor;
+    const cur = this.currentToolColor().toLowerCase();
     for (const c2 of colors) {
       const b2 = this.colorRowEl.createEl("button", { cls: "pyoink-swatch" });
       b2.style.background = c2;
       b2.title = c2;
-      if (c2.toLowerCase() === String(cur).toLowerCase()) b2.classList.add("is-active");
+      const active = c2.toLowerCase() === cur;
+      if (active) {
+        b2.classList.add("is-active");
+        const mark = b2.createSpan({ cls: "pyoink-swatch-check" });
+        mark.innerHTML = TOOLBAR_SVG.check;
+      }
       b2.onclick = () => {
         this.finishStrokeIfNeeded();
-        if (tool === "highlighter") this.plugin.settings.highlighterColor = c2;
-        else this.plugin.settings.penColor = c2;
-        void this.plugin.saveSettings();
-        this.rebuildColorRow();
-        this.updateCanvasCursor();
+        this.setToolColor(c2);
       };
     }
+  }
+  rebuildRgbRow() {
+    this.rgbRowEl.empty();
+    const tool = this.gestures.getTool();
+    if (tool === "eraser" || this.gestures.navigateMode) {
+      this.rgbRowEl.style.display = "none";
+      return;
+    }
+    this.rgbRowEl.style.display = "";
+    const { r: r2, g: g2, b: b2 } = this.hexToRgb(this.currentToolColor());
+    const preview = this.rgbRowEl.createDiv({ cls: "pyoink-rgb-preview" });
+    preview.style.background = this.currentToolColor();
+    const mk = (label, value, onChange) => {
+      const cell = this.rgbRowEl.createDiv({ cls: "pyoink-rgb-cell" });
+      cell.createSpan({ text: label, cls: "pyoink-rgb-label" });
+      const range = cell.createEl("input", { type: "range", cls: "pyoink-rgb-slider" });
+      range.min = "0";
+      range.max = "255";
+      range.step = "1";
+      range.value = String(value);
+      const num = cell.createEl("input", { type: "number", cls: "pyoink-rgb-num" });
+      num.min = "0";
+      num.max = "255";
+      num.step = "1";
+      num.value = String(value);
+      const sync = (n2) => {
+        const v2 = Math.max(0, Math.min(255, Math.round(n2)));
+        range.value = String(v2);
+        num.value = String(v2);
+        onChange(v2);
+      };
+      range.oninput = () => sync(Number(range.value));
+      num.onchange = () => sync(Number(num.value));
+      return { range, num, sync };
+    };
+    let rr = r2, gg = g2, bb = b2;
+    const apply = () => {
+      const hex = this.rgbToHex(rr, gg, bb);
+      preview.style.background = hex;
+      this.finishStrokeIfNeeded();
+      this.setToolColor(hex, true);
+    };
+    mk("R", r2, (n2) => {
+      rr = n2;
+      apply();
+    });
+    mk("G", g2, (n2) => {
+      gg = n2;
+      apply();
+    });
+    mk("B", b2, (n2) => {
+      bb = n2;
+      apply();
+    });
+  }
+  widthStepsForTool(tool) {
+    if (tool === "eraser") return WIDTH_STEPS.eraser;
+    if (tool === "highlighter") return WIDTH_STEPS.highlighter;
+    return WIDTH_STEPS.pen;
+  }
+  nearestWidthStep(tool, cur) {
+    const steps = this.widthStepsForTool(tool);
+    let best = 0;
+    let bestD = Infinity;
+    for (let i2 = 0; i2 < steps.length; i2++) {
+      const d2 = Math.abs(steps[i2] - cur);
+      if (d2 < bestD) {
+        bestD = d2;
+        best = i2;
+      }
+    }
+    return best;
   }
   rebuildWidthRow() {
     this.widthRowEl.empty();
@@ -1378,25 +1518,36 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     }
     this.widthRowEl.style.display = "";
     const tool = this.gestures.getTool();
-    const presets = tool === "eraser" ? [["S", 16], ["M", 28], ["L", 48]] : tool === "highlighter" ? [["S", 10], ["M", 16], ["L", 28]] : [["S", 1.6], ["M", 2.4], ["L", 4.5]];
+    const steps = this.widthStepsForTool(tool);
     const cur = tool === "eraser" ? this.plugin.settings.eraserWidth : tool === "highlighter" ? this.plugin.settings.highlighterWidth : this.plugin.settings.penWidth;
-    for (const [label, w2] of presets) {
-      const b2 = this.widthRowEl.createEl("button", { text: label, cls: "pyoink-width-btn" });
-      b2.dataset.w = label;
-      const dists = presets.map((p2) => Math.abs(p2[1] - cur));
-      const best = dists.indexOf(Math.min(...dists));
-      if (presets[best][0] === label) b2.classList.add("is-active");
-      b2.onclick = () => {
-        this.finishStrokeIfNeeded();
-        if (tool === "eraser") this.plugin.settings.eraserWidth = w2;
-        else if (tool === "highlighter") this.plugin.settings.highlighterWidth = w2;
-        else this.plugin.settings.penWidth = w2;
-        void this.plugin.saveSettings();
-        this.rebuildWidthRow();
-        this.updateCanvasCursor();
-        this.requestRedraw();
-      };
-    }
+    const idx = this.nearestWidthStep(tool, cur);
+    this.widthRowEl.createSpan({ text: "Size", cls: "pyoink-width-label" });
+    const range = this.widthRowEl.createEl("input", {
+      type: "range",
+      cls: "pyoink-width-slider"
+    });
+    range.min = "0";
+    range.max = String(steps.length - 1);
+    range.step = "1";
+    range.value = String(idx);
+    range.title = "Stroke width (7 steps)";
+    const val = this.widthRowEl.createSpan({
+      text: `${idx + 1}/7`,
+      cls: "pyoink-width-val"
+    });
+    const applyW = (i2) => {
+      const ii = Math.max(0, Math.min(steps.length - 1, Math.round(i2)));
+      const w2 = steps[ii];
+      this.finishStrokeIfNeeded();
+      if (tool === "eraser") this.plugin.settings.eraserWidth = w2;
+      else if (tool === "highlighter") this.plugin.settings.highlighterWidth = w2;
+      else this.plugin.settings.penWidth = w2;
+      void this.plugin.saveSettings();
+      val.setText(`${ii + 1}/7`);
+      this.updateCanvasCursor();
+      this.requestRedraw();
+    };
+    range.oninput = () => applyW(Number(range.value));
   }
   finishStrokeIfNeeded() {
     if (!this.engine.isStroking()) return;
@@ -1460,9 +1611,11 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.pageEl.classList.toggle("is-navigate", on);
     this.canvas.classList.toggle("is-pass-through", on);
     this.rebuildColorRow();
+    this.rebuildRgbRow();
     this.rebuildWidthRow();
     this.syncToolbar();
     this.updateCanvasCursor();
+    this.requestRedraw();
   }
   setTool(t2) {
     this.gestures.setTool(t2);
@@ -1477,13 +1630,67 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     const i2 = order.indexOf(cur);
     this.setTool(order[(i2 + 1) % order.length]);
     this.rebuildColorRow();
+    this.rebuildRgbRow();
     this.rebuildWidthRow();
+    this.requestRedraw();
+  }
+  runFingerAction(action) {
+    const a2 = action === "cycle_tool" ? "cycle_tool" : action;
+    switch (a2) {
+      case "none":
+        return;
+      case "cycle_tool":
+        this.cycleTool();
+        return;
+      case "undo":
+        this.finishStrokeIfNeeded();
+        if (this.engine.undo()) {
+          this.cacheValid = false;
+          this.markDirty();
+          this.requestRedraw();
+          this.syncToolbar();
+        }
+        return;
+      case "redo":
+        this.finishStrokeIfNeeded();
+        if (this.engine.redo()) {
+          this.cacheValid = false;
+          this.markDirty();
+          this.requestRedraw();
+          this.syncToolbar();
+        }
+        return;
+      case "toggle_nav":
+        this.setNavigate(!this.gestures.navigateMode);
+        return;
+      case "pen":
+      case "highlighter":
+      case "eraser":
+        this.finishStrokeIfNeeded();
+        this.setNavigate(false);
+        this.setTool(a2);
+        this.rebuildColorRow();
+        this.rebuildRgbRow();
+        this.rebuildWidthRow();
+        this.syncToolbar();
+        this.requestRedraw();
+        return;
+      case "exit":
+        void (async () => {
+          const ok = await this.flushSave();
+          if (!ok && this.dirty) {
+            if (!confirm("PyoInk: save failed. Exit anyway?")) return;
+          }
+          if (this.file) await this.leaf.openFile(this.file);
+        })();
+        return;
+    }
   }
   currentBrushRadius() {
     const tool = this.gestures.getTool();
-    if (tool === "eraser") return this.plugin.settings.eraserWidth / 2;
-    if (tool === "highlighter") return this.plugin.settings.highlighterWidth / 2;
-    return Math.max(4, this.plugin.settings.penWidth * 2);
+    if (tool === "eraser") return Math.max(6, this.plugin.settings.eraserWidth / 2);
+    if (tool === "highlighter") return Math.max(5, this.plugin.settings.highlighterWidth / 2);
+    return Math.max(3, this.plugin.settings.penWidth * 1.35);
   }
   updateCanvasCursor() {
     if (this.gestures.navigateMode) {
@@ -1492,37 +1699,71 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     }
     this.canvas.style.cursor = "none";
   }
+  /**
+   * Hover / tip preview — high-contrast so it stays visible on light & dark notes.
+   * Outer halo (white+dark) + fill matching tool color.
+   */
   paintCursor(ctx) {
     if (!this.cursorOn || this.gestures.navigateMode) return;
     if (this.cursorX < 0 || this.cursorY < 0) return;
     const r2 = this.currentBrushRadius();
     const tool = this.gestures.getTool();
+    const x2 = this.cursorX;
+    const y2 = this.cursorY;
+    const ink = tool === "eraser" ? "#dc3232" : tool === "highlighter" ? this.plugin.settings.highlighterColor : this.plugin.settings.penColor;
     ctx.save();
     ctx.beginPath();
-    ctx.arc(this.cursorX, this.cursorY, r2, 0, Math.PI * 2);
+    ctx.arc(x2, y2, r2 + 2.5, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,255,255,0.92)";
+    ctx.lineWidth = 3;
+    ctx.setLineDash([]);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x2, y2, r2 + 2.5, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(0,0,0,0.55)";
+    ctx.lineWidth = 1.25;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x2, y2, r2, 0, Math.PI * 2);
     if (tool === "eraser") {
+      ctx.fillStyle = "rgba(220, 50, 50, 0.14)";
       ctx.strokeStyle = "rgba(220, 50, 50, 0.95)";
-      ctx.fillStyle = "rgba(220, 50, 50, 0.12)";
       ctx.lineWidth = 2;
       ctx.setLineDash([4, 3]);
     } else if (tool === "highlighter") {
-      ctx.strokeStyle = this.plugin.settings.highlighterColor;
-      ctx.fillStyle = this.hexAlpha(this.plugin.settings.highlighterColor, 0.25);
-      ctx.lineWidth = 1.5;
+      ctx.fillStyle = this.hexAlpha(ink, 0.28);
+      ctx.strokeStyle = ink;
+      ctx.lineWidth = 2;
       ctx.setLineDash([]);
     } else {
-      ctx.strokeStyle = this.plugin.settings.penColor;
-      ctx.fillStyle = this.hexAlpha(this.plugin.settings.penColor, 0.18);
-      ctx.lineWidth = 1.5;
+      ctx.fillStyle = this.hexAlpha(ink, 0.22);
+      ctx.strokeStyle = ink;
+      ctx.lineWidth = 2;
       ctx.setLineDash([]);
     }
     ctx.fill();
     ctx.stroke();
-    ctx.beginPath();
     ctx.setLineDash([]);
-    ctx.fillStyle = tool === "eraser" ? "rgba(220,50,50,0.9)" : this.plugin.settings.penColor;
-    if (tool === "highlighter") ctx.fillStyle = this.plugin.settings.highlighterColor;
-    ctx.arc(this.cursorX, this.cursorY, 1.5, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,255,255,0.95)";
+    ctx.lineWidth = 2.5;
+    const c2 = Math.min(4, r2 * 0.45);
+    ctx.beginPath();
+    ctx.moveTo(x2 - c2, y2);
+    ctx.lineTo(x2 + c2, y2);
+    ctx.moveTo(x2, y2 - c2);
+    ctx.lineTo(x2, y2 + c2);
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(0,0,0,0.7)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x2 - c2, y2);
+    ctx.lineTo(x2 + c2, y2);
+    ctx.moveTo(x2, y2 - c2);
+    ctx.lineTo(x2, y2 + c2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.fillStyle = ink;
+    ctx.arc(x2, y2, 1.75, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }
@@ -1645,21 +1886,50 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       },
       { passive: false }
     );
-    c2.addEventListener("pointermove", (ev) => {
+    const updateHover = (ev) => {
+      if (this.dragBound) return;
+      if (ev.pointerType === "touch" && this.plugin.settings.penOnlyInk !== false) {
+        return;
+      }
       const rect = c2.getBoundingClientRect();
       this.cursorX = ev.clientX - rect.left;
       this.cursorY = ev.clientY - rect.top;
       this.cursorOn = true;
-      if (!this.gestures.isDrawing() && this.state === "ready") this.requestRedraw();
-    }, { capture: true });
-    c2.addEventListener("pointerenter", () => {
-      this.cursorOn = true;
-      this.updateCanvasCursor();
-    });
-    c2.addEventListener("pointerleave", () => {
-      this.cursorOn = false;
-      this.requestRedraw();
-    });
+      if (typeof ev.pressure === "number" && ev.pressure > 0) {
+        this.cursorPressure = ev.pressure;
+      }
+      if (this.state === "ready" || this.state === "stroking") this.requestRedraw();
+    };
+    c2.addEventListener("pointermove", updateHover, { capture: true, passive: true });
+    c2.addEventListener(
+      "pointerrawupdate",
+      updateHover,
+      { capture: true, passive: true }
+    );
+    c2.addEventListener(
+      "pointerenter",
+      (ev) => {
+        this.cursorOn = true;
+        updateHover(ev);
+        this.updateCanvasCursor();
+      },
+      { capture: true }
+    );
+    c2.addEventListener(
+      "pointerleave",
+      () => {
+        this.cursorOn = false;
+        this.requestRedraw();
+      },
+      { capture: true }
+    );
+    c2.addEventListener(
+      "pointerover",
+      (ev) => {
+        if (ev.pointerType === "pen" || ev.pointerType === "mouse") updateHover(ev);
+      },
+      { capture: true }
+    );
     this.updateCanvasCursor();
   }
   handleGesture(action, ev, rect) {
