@@ -1,6 +1,5 @@
 import {
   ItemView,
-  MarkdownRenderer,
   Notice,
   TFile,
   WorkspaceLeaf,
@@ -153,16 +152,16 @@ export class PyoInkView extends ItemView {
     this.syncToolbar();
     this.noteEl.empty();
 
+    // Show the note as raw .md source (same bytes as vault file).
+    // MarkdownRenderer HTML preview differs from the editor and was confusing.
     try {
       const md = await this.app.vault.read(file);
-      await MarkdownRenderer.render(this.app, md, this.noteEl, file.path, this);
-      // internal links: make them work when navigate mode / click-through
-      this.wireInternalLinks();
+      this.renderSourceMarkdown(md);
     } catch (e) {
       inkLog("E_RENDER", e);
       this.state = "error";
-      this.noteEl.setText("(render failed)\n\n" + (await this.app.vault.read(file).catch(() => "")));
-      new Notice("PyoInk: markdown render failed — showing raw");
+      this.noteEl.setText("(read failed)");
+      new Notice("PyoInk: could not read note");
     }
 
     const loaded = await this.store.load(file.path);
@@ -182,7 +181,19 @@ export class PyoInkView extends ItemView {
     this.rootEl.focus();
   }
 
+  /** Display vault file text as-is (source mode look), not HTML preview. */
+  private renderSourceMarkdown(md: string) {
+    this.noteEl.empty();
+    this.noteEl.addClass("pyoink-content-source");
+    // Preserve exact newlines / spaces like the .md file
+    const pre = this.noteEl.createEl("pre", { cls: "pyoink-md-source" });
+    const code = pre.createEl("code", { cls: "pyoink-md-source-code language-markdown" });
+    // textContent, not innerHTML — no escaping surprises, exact source
+    code.textContent = md.endsWith("\n") ? md : md;
+  }
+
   private wireInternalLinks() {
+    // Source view has no HTML links; Nav mode still uses click-through hit-test on text.
     this.noteEl.querySelectorAll("a.internal-link").forEach((a) => {
       a.addEventListener("click", (ev) => {
         ev.preventDefault();

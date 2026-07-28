@@ -1299,13 +1299,12 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.noteEl.empty();
     try {
       const md = await this.app.vault.read(file);
-      await import_obsidian2.MarkdownRenderer.render(this.app, md, this.noteEl, file.path, this);
-      this.wireInternalLinks();
+      this.renderSourceMarkdown(md);
     } catch (e2) {
       inkLog("E_RENDER", e2);
       this.state = "error";
-      this.noteEl.setText("(render failed)\n\n" + await this.app.vault.read(file).catch(() => ""));
-      new import_obsidian2.Notice("PyoInk: markdown render failed \u2014 showing raw");
+      this.noteEl.setText("(read failed)");
+      new import_obsidian2.Notice("PyoInk: could not read note");
     }
     const loaded = await this.store.load(file.path);
     this.doc = loaded.doc;
@@ -1321,6 +1320,14 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.watchResize();
     this.state = this.state === "error" ? "error" : "ready";
     this.rootEl.focus();
+  }
+  /** Display vault file text as-is (source mode look), not HTML preview. */
+  renderSourceMarkdown(md) {
+    this.noteEl.empty();
+    this.noteEl.addClass("pyoink-content-source");
+    const pre = this.noteEl.createEl("pre", { cls: "pyoink-md-source" });
+    const code = pre.createEl("code", { cls: "pyoink-md-source-code language-markdown" });
+    code.textContent = md.endsWith("\n") ? md : md;
   }
   wireInternalLinks() {
     this.noteEl.querySelectorAll("a.internal-link").forEach((a2) => {
