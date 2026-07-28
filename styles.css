@@ -1,0 +1,129 @@
+/* PyoInk — transparent ink layer over Markdown */
+.pyoink-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--background-primary);
+  outline: none;
+}
+
+.pyoink-scroll {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  touch-action: pan-y pan-x;
+  z-index: 1;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Page stacks MD + transparent canvas (same coordinate space, scroll together) */
+.pyoink-page {
+  position: relative;
+  margin: 0 auto;
+  max-width: 100%;
+}
+
+.pyoink-content {
+  position: relative;
+  z-index: 1;
+  padding: 1.5rem 2rem 6rem;
+  max-width: var(--file-line-width, 700px);
+  margin: 0 auto;
+  /* content is visible under ink; default no hit so pen goes to canvas */
+  pointer-events: none;
+  background: transparent;
+}
+
+.pyoink-page.is-navigate .pyoink-content {
+  pointer-events: auto;
+}
+
+.pyoink-content a {
+  cursor: pointer;
+}
+
+/* Transparent ink overlay — sits ON TOP of markdown */
+.pyoink-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 2;
+  touch-action: none;
+  pointer-events: auto;
+  background: transparent;
+  /* no fill — ink only */
+}
+
+.pyoink-canvas.is-pass-through {
+  pointer-events: none;
+}
+
+.pyoink-toolbar {
+  position: absolute;
+  left: 50%;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 96%;
+  justify-content: center;
+  padding: 8px 10px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--background-secondary) 92%, transparent);
+  border: 1px solid var(--background-modifier-border);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+}
+
+.pyoink-toolbar button {
+  min-width: 40px;
+  height: 36px;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-normal);
+  font-size: 12px;
+  padding: 0 10px;
+}
+
+.pyoink-toolbar button.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.pyoink-status {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 30;
+  font-size: 11px;
+  opacity: 0.75;
+  max-width: 55%;
+  text-align: right;
+  pointer-events: none;
+}
+
+.pyoink-drift {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  z-index: 30;
+  font-size: 11px;
+  font-weight: 600;
+  pointer-events: none;
+  max-width: 40%;
+}
+
+.pyoink-drift.is-soft {
+  color: #c9a227;
+}
+.pyoink-drift.is-hard {
+  color: #d9480f;
+}
+.pyoink-drift.is-broken {
+  color: var(--text-error);
+}

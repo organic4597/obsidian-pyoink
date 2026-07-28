@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Build
+# keep main.js committed for simple BRAT installs from main branch if desired
+# *.js.map
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Hermes local only
+*.log
