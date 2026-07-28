@@ -52,7 +52,15 @@ export interface PyoInkSettings {
   eraserWidth: number;
   toolCycle: InkTool[];
   enableTwoFingerToolCycle: boolean;
-  enablePencilDoubleTapProbe: boolean;
+  /**
+   * Apple Pencil **tip** double-tap (two quick tip taps) — works in Obsidian WebView.
+   * Barrel/side double-tap is OS-native and usually NOT delivered to plugins.
+   */
+  enablePencilDoubleTap: boolean;
+  /** Action for Pencil tip double-tap (default: cycle tools). */
+  pencilDoubleTapAction: FingerAction;
+  /** @deprecated use enablePencilDoubleTap */
+  enablePencilDoubleTapProbe?: boolean;
   penOnlyInk: boolean;
   allowFingerDraw: boolean;
   palmRejectMs: number;
@@ -72,8 +80,34 @@ export interface PyoInkSettings {
   twoFingerTapAction: FingerAction;
   /** Three-finger short tap */
   threeFingerTapAction: FingerAction;
-  /** Single-finger double-tap */
+  /** Single-finger double-tap (finger, not Pencil) */
   doubleTapAction: FingerAction;
+}
+
+/** Shared 7-step width ladders (toolbar slider). */
+export const WIDTH_STEPS: Record<InkTool, number[]> = {
+  pen: [1.0, 1.6, 2.2, 3.0, 4.0, 5.5, 8.0],
+  highlighter: [8, 12, 16, 20, 26, 34, 44],
+  eraser: [12, 18, 24, 32, 42, 56, 72],
+};
+
+export function nearestWidthStep(tool: InkTool, cur: number): number {
+  const steps = WIDTH_STEPS[tool];
+  let best = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < steps.length; i++) {
+    const d = Math.abs(steps[i] - cur);
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+export function snapWidth(tool: InkTool, cur: number): number {
+  const steps = WIDTH_STEPS[tool];
+  return steps[nearestWidthStep(tool, cur)];
 }
 
 const FINGER_ACTIONS = new Set<string>(Object.keys(FINGER_ACTION_LABELS));
@@ -92,7 +126,8 @@ export const DEFAULT_SETTINGS: PyoInkSettings = {
   eraserWidth: 28,
   toolCycle: ["pen", "highlighter", "eraser"],
   enableTwoFingerToolCycle: true,
-  enablePencilDoubleTapProbe: false,
+  enablePencilDoubleTap: true,
+  pencilDoubleTapAction: "cycle_tool",
   penOnlyInk: true,
   allowFingerDraw: false,
   palmRejectMs: 700,
@@ -118,9 +153,12 @@ export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined
     folder = DEFAULT_SETTINGS.annotationsFolder;
   }
   s.annotationsFolder = folder.replace(/\/+$/, "");
-  s.penWidth = clamp(Number(s.penWidth), 0.5, 40);
-  s.highlighterWidth = clamp(Number(s.highlighterWidth), 2, 80);
-  s.eraserWidth = clamp(Number(s.eraserWidth), 8, 120);
+  s.penWidth = snapWidth("pen", clamp(Number(s.penWidth), 0.5, 40));
+  s.highlighterWidth = snapWidth(
+    "highlighter",
+    clamp(Number(s.highlighterWidth), 2, 80),
+  );
+  s.eraserWidth = snapWidth("eraser", clamp(Number(s.eraserWidth), 8, 120));
   s.pressureGain = clamp(Number(s.pressureGain), 0.3, 3);
   s.pfSmoothing = clamp(Number(s.pfSmoothing), 0, 0.95);
   s.pfThinning = clamp(Number(s.pfThinning), -0.99, 0.99);
@@ -140,6 +178,15 @@ export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined
   s.twoFingerTapAction = asFingerAction(s.twoFingerTapAction, "cycle_tool");
   s.threeFingerTapAction = asFingerAction(s.threeFingerTapAction, "undo");
   s.doubleTapAction = asFingerAction(s.doubleTapAction, "toggle_nav");
+  // legacy probe flag → enablePencilDoubleTap
+  if (s.enablePencilDoubleTap === undefined && s.enablePencilDoubleTapProbe !== undefined) {
+    s.enablePencilDoubleTap = !!s.enablePencilDoubleTapProbe;
+  }
+  if (s.enablePencilDoubleTap === undefined) s.enablePencilDoubleTap = true;
+  s.pencilDoubleTapAction = asFingerAction(
+    s.pencilDoubleTapAction,
+    "cycle_tool",
+  );
   // legacy: enableTwoFingerToolCycle false → none
   if (s.enableTwoFingerToolCycle === false && s.twoFingerTapAction === "cycle_tool") {
     s.twoFingerTapAction = "none";

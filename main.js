@@ -532,6 +532,11 @@ var GestureRouter = class {
     this.lastSingleTapAt = 0;
     this.lastSingleTapX = 0;
     this.lastSingleTapY = 0;
+    /** Pencil tip double-tap (two quick tip taps) */
+    this.lastPenTapAt = 0;
+    this.lastPenTapX = 0;
+    this.lastPenTapY = 0;
+    this.penDownAt = 0;
     this.downSample = null;
     this.movedPx = 0;
   }
@@ -572,6 +577,7 @@ var GestureRouter = class {
     if (ev.pointerType === "pen") {
       this.penDownIds.add(ev.pointerId);
       this.lastPenAt = performance.now();
+      this.penDownAt = performance.now();
     }
     if (ev.pointerType === "touch") {
       if (this.penOwnsSurface(s2)) {
@@ -657,6 +663,28 @@ var GestureRouter = class {
     if (ev.pointerType === "pen") {
       this.penDownIds.delete(ev.pointerId);
       this.lastPenAt = performance.now();
+      const sPen = s2;
+      const wasDrawing = this.activeDrawId === ev.pointerId;
+      const holdMs = performance.now() - (this.penDownAt || performance.now());
+      const sample = this.sampleFromEvent(ev, canvasRect);
+      const shortTap = this.movedPx < 16 && holdMs < 320;
+      if (sPen.enablePencilDoubleTap !== false && shortTap && wasDrawing && performance.now() - this.lastShortcutAt > 180) {
+        const now = performance.now();
+        if (now - this.lastPenTapAt < 420 && Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 48) {
+          this.lastPenTapAt = 0;
+          this.lastShortcutAt = now;
+          this.clearActiveDraw();
+          const action = sPen.pencilDoubleTapAction && sPen.pencilDoubleTapAction !== "none" ? sPen.pencilDoubleTapAction : "cycle_tool";
+          return {
+            type: "pen-double-tap",
+            action,
+            pointerId: ev.pointerId
+          };
+        }
+        this.lastPenTapAt = now;
+        this.lastPenTapX = sample.x;
+        this.lastPenTapY = sample.y;
+      }
     }
     if (ev.pointerType === "touch") {
       this.fingerIds.delete(ev.pointerId);
@@ -1076,6 +1104,28 @@ var HI_COLORS = [
   "#74c0fc",
   "#f783ac"
 ];
+var WIDTH_STEPS = {
+  pen: [1, 1.6, 2.2, 3, 4, 5.5, 8],
+  highlighter: [8, 12, 16, 20, 26, 34, 44],
+  eraser: [12, 18, 24, 32, 42, 56, 72]
+};
+function nearestWidthStep(tool, cur) {
+  const steps = WIDTH_STEPS[tool];
+  let best = 0;
+  let bestD = Infinity;
+  for (let i2 = 0; i2 < steps.length; i2++) {
+    const d2 = Math.abs(steps[i2] - cur);
+    if (d2 < bestD) {
+      bestD = d2;
+      best = i2;
+    }
+  }
+  return best;
+}
+function snapWidth(tool, cur) {
+  const steps = WIDTH_STEPS[tool];
+  return steps[nearestWidthStep(tool, cur)];
+}
 var FINGER_ACTIONS = new Set(Object.keys(FINGER_ACTION_LABELS));
 function asFingerAction(v2, fallback) {
   const s2 = String(v2 || "");
@@ -1090,7 +1140,8 @@ var DEFAULT_SETTINGS = {
   eraserWidth: 28,
   toolCycle: ["pen", "highlighter", "eraser"],
   enableTwoFingerToolCycle: true,
-  enablePencilDoubleTapProbe: false,
+  enablePencilDoubleTap: true,
+  pencilDoubleTapAction: "cycle_tool",
   penOnlyInk: true,
   allowFingerDraw: false,
   palmRejectMs: 700,
@@ -1115,9 +1166,12 @@ function sanitizeSettings(raw) {
     folder = DEFAULT_SETTINGS.annotationsFolder;
   }
   s2.annotationsFolder = folder.replace(/\/+$/, "");
-  s2.penWidth = clamp(Number(s2.penWidth), 0.5, 40);
-  s2.highlighterWidth = clamp(Number(s2.highlighterWidth), 2, 80);
-  s2.eraserWidth = clamp(Number(s2.eraserWidth), 8, 120);
+  s2.penWidth = snapWidth("pen", clamp(Number(s2.penWidth), 0.5, 40));
+  s2.highlighterWidth = snapWidth(
+    "highlighter",
+    clamp(Number(s2.highlighterWidth), 2, 80)
+  );
+  s2.eraserWidth = snapWidth("eraser", clamp(Number(s2.eraserWidth), 8, 120));
   s2.pressureGain = clamp(Number(s2.pressureGain), 0.3, 3);
   s2.pfSmoothing = clamp(Number(s2.pfSmoothing), 0, 0.95);
   s2.pfThinning = clamp(Number(s2.pfThinning), -0.99, 0.99);
@@ -1136,6 +1190,14 @@ function sanitizeSettings(raw) {
   s2.twoFingerTapAction = asFingerAction(s2.twoFingerTapAction, "cycle_tool");
   s2.threeFingerTapAction = asFingerAction(s2.threeFingerTapAction, "undo");
   s2.doubleTapAction = asFingerAction(s2.doubleTapAction, "toggle_nav");
+  if (s2.enablePencilDoubleTap === void 0 && s2.enablePencilDoubleTapProbe !== void 0) {
+    s2.enablePencilDoubleTap = !!s2.enablePencilDoubleTapProbe;
+  }
+  if (s2.enablePencilDoubleTap === void 0) s2.enablePencilDoubleTap = true;
+  s2.pencilDoubleTapAction = asFingerAction(
+    s2.pencilDoubleTapAction,
+    "cycle_tool"
+  );
   if (s2.enableTwoFingerToolCycle === false && s2.twoFingerTapAction === "cycle_tool") {
     s2.twoFingerTapAction = "none";
   }
@@ -1143,11 +1205,6 @@ function sanitizeSettings(raw) {
 }
 
 // src/view/PyoInkView.ts
-var WIDTH_STEPS = {
-  pen: [1, 1.6, 2.2, 3, 4, 5.5, 8],
-  highlighter: [8, 12, 16, 20, 26, 34, 44],
-  eraser: [12, 18, 24, 32, 42, 56, 72]
-};
 var TOOLBAR_SVG = {
   pen: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>`,
   highlighter: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/></svg>`,
@@ -1492,24 +1549,6 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       apply();
     });
   }
-  widthStepsForTool(tool) {
-    if (tool === "eraser") return WIDTH_STEPS.eraser;
-    if (tool === "highlighter") return WIDTH_STEPS.highlighter;
-    return WIDTH_STEPS.pen;
-  }
-  nearestWidthStep(tool, cur) {
-    const steps = this.widthStepsForTool(tool);
-    let best = 0;
-    let bestD = Infinity;
-    for (let i2 = 0; i2 < steps.length; i2++) {
-      const d2 = Math.abs(steps[i2] - cur);
-      if (d2 < bestD) {
-        bestD = d2;
-        best = i2;
-      }
-    }
-    return best;
-  }
   rebuildWidthRow() {
     this.widthRowEl.empty();
     if (this.gestures.navigateMode) {
@@ -1518,10 +1557,19 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     }
     this.widthRowEl.style.display = "";
     const tool = this.gestures.getTool();
-    const steps = this.widthStepsForTool(tool);
+    const steps = WIDTH_STEPS[tool];
     const cur = tool === "eraser" ? this.plugin.settings.eraserWidth : tool === "highlighter" ? this.plugin.settings.highlighterWidth : this.plugin.settings.penWidth;
-    const idx = this.nearestWidthStep(tool, cur);
-    this.widthRowEl.createSpan({ text: "Size", cls: "pyoink-width-label" });
+    const idx = nearestWidthStep(tool, cur);
+    const toolLabel = tool === "eraser" ? "Eraser" : tool === "highlighter" ? "Marker" : "Pen";
+    this.widthRowEl.createSpan({
+      text: `${toolLabel}`,
+      cls: "pyoink-width-label"
+    });
+    const minus = this.widthRowEl.createEl("button", {
+      text: "\u2212",
+      cls: "pyoink-width-step"
+    });
+    minus.title = "Thinner";
     const range = this.widthRowEl.createEl("input", {
       type: "range",
       cls: "pyoink-width-slider"
@@ -1530,7 +1578,12 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     range.max = String(steps.length - 1);
     range.step = "1";
     range.value = String(idx);
-    range.title = "Stroke width (7 steps)";
+    range.title = `${toolLabel} size (7 steps)`;
+    const plus = this.widthRowEl.createEl("button", {
+      text: "+",
+      cls: "pyoink-width-step"
+    });
+    plus.title = "Thicker";
     const val = this.widthRowEl.createSpan({
       text: `${idx + 1}/7`,
       cls: "pyoink-width-val"
@@ -1543,11 +1596,20 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       else if (tool === "highlighter") this.plugin.settings.highlighterWidth = w2;
       else this.plugin.settings.penWidth = w2;
       void this.plugin.saveSettings();
+      range.value = String(ii);
       val.setText(`${ii + 1}/7`);
       this.updateCanvasCursor();
       this.requestRedraw();
     };
     range.oninput = () => applyW(Number(range.value));
+    minus.onclick = (ev) => {
+      ev.preventDefault();
+      applyW(Number(range.value) - 1);
+    };
+    plus.onclick = (ev) => {
+      ev.preventDefault();
+      applyW(Number(range.value) + 1);
+    };
   }
   finishStrokeIfNeeded() {
     if (!this.engine.isStroking()) return;
@@ -1971,6 +2033,24 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       case "finger-action":
         this.runFingerAction(action.action);
         return;
+      case "pen-double-tap": {
+        this.engine.cancel();
+        this.gestures.clearActiveDraw();
+        this.state = "ready";
+        if (this.engine.canUndo()) {
+          this.engine.undo();
+          this.cacheValid = false;
+          this.markDirty();
+        }
+        try {
+          this.canvas.releasePointerCapture(action.pointerId);
+        } catch {
+        }
+        this.runFingerAction(action.action);
+        this.syncToolbar();
+        this.requestRedraw();
+        return;
+      }
       case "draw-start":
       case "erase-start": {
         if (ev.pointerType === "touch" && this.plugin.settings.penOnlyInk !== false) {
@@ -2272,6 +2352,23 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
     containerEl.createEl("p", {
       text: "Pen color, width, and tools are set on the floating toolbar while writing. Only shortcuts & storage here."
     });
+    containerEl.createEl("h3", { text: "Apple Pencil" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "Tip double-tap = two quick taps with the Pencil tip on the note (works in Obsidian). The side/barrel double-tap is handled by iPadOS and usually never reaches plugins."
+    });
+    new import_obsidian3.Setting(containerEl).setName("Enable Pencil tip double-tap").setDesc("Two quick tip taps \u2192 action below (default: cycle pen / marker / eraser).").addToggle(
+      (t2) => t2.setValue(this.plugin.settings.enablePencilDoubleTap !== false).onChange(async (v2) => {
+        this.plugin.settings.enablePencilDoubleTap = v2;
+        await this.plugin.saveSettings();
+      })
+    );
+    this.fingerDropdown(
+      containerEl,
+      "Pencil tip double-tap action",
+      "pencilDoubleTapAction",
+      this.plugin.settings.pencilDoubleTapAction || "cycle_tool"
+    );
     containerEl.createEl("h3", { text: "Finger shortcuts" });
     containerEl.createEl("p", {
       cls: "setting-item-description",

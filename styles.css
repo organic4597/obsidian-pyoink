@@ -252,11 +252,12 @@
   text-align: center;
 }
 
-/* Width 7-step slider */
+/* Width 7-step slider (+/− for iPad) */
 .pyoink-width-row {
   width: 100%;
-  gap: 8px !important;
+  gap: 6px !important;
   justify-content: stretch !important;
+  align-items: center !important;
 }
 
 .pyoink-width-label {
@@ -264,13 +265,31 @@
   font-weight: 700;
   color: var(--text-muted);
   flex-shrink: 0;
+  min-width: 44px;
 }
 
 .pyoink-width-slider {
   flex: 1;
-  min-width: 120px;
-  height: 22px;
+  min-width: 100px;
+  height: 28px;
   accent-color: var(--interactive-accent);
+}
+
+.pyoink-width-step {
+  width: 32px !important;
+  height: 32px !important;
+  min-width: 32px !important;
+  border-radius: 10px !important;
+  font-size: 18px !important;
+  font-weight: 700 !important;
+  line-height: 1 !important;
+  background: var(--background-modifier-border) !important;
+  color: var(--text-normal) !important;
+}
+
+.pyoink-width-step:active {
+  background: var(--interactive-accent) !important;
+  color: var(--text-on-accent, #fff) !important;
 }
 
 .pyoink-width-val {

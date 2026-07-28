@@ -10,6 +10,8 @@ export type GestureAction =
   | { type: "draw-move"; pointerId: number; samples: Sample[] }
   | { type: "draw-end"; pointerId: number }
   | { type: "finger-action"; action: FingerAction }
+  /** Pencil tip double-tap — cancel active stroke + optional undo of first tap */
+  | { type: "pen-double-tap"; action: FingerAction; pointerId: number }
   /** @deprecated use finger-action */
   | { type: "tool-cycle" };
 
@@ -42,6 +44,12 @@ export class GestureRouter {
   private lastSingleTapAt = 0;
   private lastSingleTapX = 0;
   private lastSingleTapY = 0;
+
+  /** Pencil tip double-tap (two quick tip taps) */
+  private lastPenTapAt = 0;
+  private lastPenTapX = 0;
+  private lastPenTapY = 0;
+  private penDownAt = 0;
 
   private downSample: Sample | null = null;
   private movedPx = 0;
@@ -93,6 +101,7 @@ export class GestureRouter {
     if (ev.pointerType === "pen") {
       this.penDownIds.add(ev.pointerId);
       this.lastPenAt = performance.now();
+      this.penDownAt = performance.now();
     }
 
     if (ev.pointerType === "touch") {
@@ -199,6 +208,41 @@ export class GestureRouter {
     if (ev.pointerType === "pen") {
       this.penDownIds.delete(ev.pointerId);
       this.lastPenAt = performance.now();
+
+      // Pencil tip double-tap (barrel hardware tap is NOT available in WebView)
+      const sPen = s;
+      const wasDrawing = this.activeDrawId === ev.pointerId;
+      const holdMs = performance.now() - (this.penDownAt || performance.now());
+      const sample = this.sampleFromEvent(ev, canvasRect);
+      const shortTap = this.movedPx < 16 && holdMs < 320;
+      if (
+        sPen.enablePencilDoubleTap !== false &&
+        shortTap &&
+        wasDrawing &&
+        performance.now() - this.lastShortcutAt > 180
+      ) {
+        const now = performance.now();
+        if (
+          now - this.lastPenTapAt < 420 &&
+          Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 48
+        ) {
+          this.lastPenTapAt = 0;
+          this.lastShortcutAt = now;
+          this.clearActiveDraw();
+          const action =
+            sPen.pencilDoubleTapAction && sPen.pencilDoubleTapAction !== "none"
+              ? sPen.pencilDoubleTapAction
+              : "cycle_tool";
+          return {
+            type: "pen-double-tap",
+            action,
+            pointerId: ev.pointerId,
+          };
+        }
+        this.lastPenTapAt = now;
+        this.lastPenTapX = sample.x;
+        this.lastPenTapY = sample.y;
+      }
     }
 
     if (ev.pointerType === "touch") {

@@ -12,15 +12,14 @@ import { measureLayout } from "../layout/LayoutSnapshot";
 import { emptyDoc, type InkDocV1 } from "../store/schema";
 import { InkStore } from "../store/InkStore";
 import type { InkTool } from "../util/settings";
-import { HI_COLORS, PEN_COLORS, type FingerAction } from "../util/settings";
+import {
+  HI_COLORS,
+  PEN_COLORS,
+  WIDTH_STEPS,
+  nearestWidthStep,
+  type FingerAction,
+} from "../util/settings";
 import { inkLog } from "../util/errors";
-
-/** 7-step brush widths per tool (index 0–6). */
-const WIDTH_STEPS: Record<"pen" | "highlighter" | "eraser", number[]> = {
-  pen: [1.0, 1.6, 2.2, 3.0, 4.0, 5.5, 8.0],
-  highlighter: [8, 12, 16, 20, 26, 34, 44],
-  eraser: [12, 18, 24, 32, 42, 56, 72],
-};
 
 /** Built-in SVGs — setIcon lucide names often invisible/missing in some themes. */
 const TOOLBAR_SVG: Record<string, string> = {
@@ -437,44 +436,37 @@ export class PyoInkView extends ItemView {
     });
   }
 
-  private widthStepsForTool(tool: InkTool): number[] {
-    if (tool === "eraser") return WIDTH_STEPS.eraser;
-    if (tool === "highlighter") return WIDTH_STEPS.highlighter;
-    return WIDTH_STEPS.pen;
-  }
-
-  private nearestWidthStep(tool: InkTool, cur: number): number {
-    const steps = this.widthStepsForTool(tool);
-    let best = 0;
-    let bestD = Infinity;
-    for (let i = 0; i < steps.length; i++) {
-      const d = Math.abs(steps[i] - cur);
-      if (d < bestD) {
-        bestD = d;
-        best = i;
-      }
-    }
-    return best;
-  }
-
   private rebuildWidthRow() {
     this.widthRowEl.empty();
+    // Size control for pen / highlighter / eraser (all tools)
     if (this.gestures.navigateMode) {
       this.widthRowEl.style.display = "none";
       return;
     }
     this.widthRowEl.style.display = "";
     const tool = this.gestures.getTool();
-    const steps = this.widthStepsForTool(tool);
+    const steps = WIDTH_STEPS[tool];
     const cur =
       tool === "eraser"
         ? this.plugin.settings.eraserWidth
         : tool === "highlighter"
           ? this.plugin.settings.highlighterWidth
           : this.plugin.settings.penWidth;
-    const idx = this.nearestWidthStep(tool, cur);
+    const idx = nearestWidthStep(tool, cur);
+    const toolLabel =
+      tool === "eraser" ? "Eraser" : tool === "highlighter" ? "Marker" : "Pen";
 
-    this.widthRowEl.createSpan({ text: "Size", cls: "pyoink-width-label" });
+    this.widthRowEl.createSpan({
+      text: `${toolLabel}`,
+      cls: "pyoink-width-label",
+    });
+
+    const minus = this.widthRowEl.createEl("button", {
+      text: "−",
+      cls: "pyoink-width-step",
+    });
+    minus.title = "Thinner";
+
     const range = this.widthRowEl.createEl("input", {
       type: "range",
       cls: "pyoink-width-slider",
@@ -483,11 +475,19 @@ export class PyoInkView extends ItemView {
     range.max = String(steps.length - 1);
     range.step = "1";
     range.value = String(idx);
-    range.title = "Stroke width (7 steps)";
+    range.title = `${toolLabel} size (7 steps)`;
+
+    const plus = this.widthRowEl.createEl("button", {
+      text: "+",
+      cls: "pyoink-width-step",
+    });
+    plus.title = "Thicker";
+
     const val = this.widthRowEl.createSpan({
       text: `${idx + 1}/7`,
       cls: "pyoink-width-val",
     });
+
     const applyW = (i: number) => {
       const ii = Math.max(0, Math.min(steps.length - 1, Math.round(i)));
       const w = steps[ii];
@@ -496,11 +496,20 @@ export class PyoInkView extends ItemView {
       else if (tool === "highlighter") this.plugin.settings.highlighterWidth = w;
       else this.plugin.settings.penWidth = w;
       void this.plugin.saveSettings();
+      range.value = String(ii);
       val.setText(`${ii + 1}/7`);
       this.updateCanvasCursor();
       this.requestRedraw();
     };
     range.oninput = () => applyW(Number(range.value));
+    minus.onclick = (ev) => {
+      ev.preventDefault();
+      applyW(Number(range.value) - 1);
+    };
+    plus.onclick = (ev) => {
+      ev.preventDefault();
+      applyW(Number(range.value) + 1);
+    };
   }
 
   private finishStrokeIfNeeded() {
@@ -974,6 +983,27 @@ export class PyoInkView extends ItemView {
       case "finger-action":
         this.runFingerAction(action.action);
         return;
+      case "pen-double-tap": {
+        // Cancel in-progress stroke (2nd tip tap), drop first-tap ink if tiny
+        this.engine.cancel();
+        this.gestures.clearActiveDraw();
+        this.state = "ready";
+        // First tip tap usually committed a short stroke — undo it
+        if (this.engine.canUndo()) {
+          this.engine.undo();
+          this.cacheValid = false;
+          this.markDirty();
+        }
+        try {
+          this.canvas.releasePointerCapture(action.pointerId);
+        } catch {
+          /* */
+        }
+        this.runFingerAction(action.action);
+        this.syncToolbar();
+        this.requestRedraw();
+        return;
+      }
       case "draw-start":
       case "erase-start": {
         // Hard guard: hand/touch must never ink when pen-only (default)

@@ -76,6 +76,27 @@ class PyoInkSettingTab extends PluginSettingTab {
       text: "Pen color, width, and tools are set on the floating toolbar while writing. Only shortcuts & storage here.",
     });
 
+    containerEl.createEl("h3", { text: "Apple Pencil" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "Tip double-tap = two quick taps with the Pencil tip on the note (works in Obsidian). The side/barrel double-tap is handled by iPadOS and usually never reaches plugins.",
+    });
+    new Setting(containerEl)
+      .setName("Enable Pencil tip double-tap")
+      .setDesc("Two quick tip taps → action below (default: cycle pen / marker / eraser).")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.enablePencilDoubleTap !== false).onChange(async (v) => {
+          this.plugin.settings.enablePencilDoubleTap = v;
+          await this.plugin.saveSettings();
+        }),
+      );
+    this.fingerDropdown(
+      containerEl,
+      "Pencil tip double-tap action",
+      "pencilDoubleTapAction",
+      this.plugin.settings.pencilDoubleTapAction || "cycle_tool",
+    );
+
     containerEl.createEl("h3", { text: "Finger shortcuts" });
     containerEl.createEl("p", {
       cls: "setting-item-description",
@@ -135,7 +156,11 @@ class PyoInkSettingTab extends PluginSettingTab {
   private fingerDropdown(
     containerEl: HTMLElement,
     name: string,
-    key: "twoFingerTapAction" | "threeFingerTapAction" | "doubleTapAction",
+    key:
+      | "twoFingerTapAction"
+      | "threeFingerTapAction"
+      | "doubleTapAction"
+      | "pencilDoubleTapAction",
     value: FingerAction,
   ) {
     new Setting(containerEl).setName(name).addDropdown((d) => {
