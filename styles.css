@@ -24,44 +24,32 @@
   max-width: 100%;
 }
 
+/* Note body — use Obsidian Reading View classes on the same node (see TS).
+   Keep pointer-events none so ink canvas receives Pencil; Nav mode re-enables via .is-navigate */
 .pyoink-content {
   position: relative;
   z-index: 1;
-  padding: 1.5rem 2rem 7rem;
-  max-width: var(--file-line-width, 700px);
-  margin: 0 auto;
   pointer-events: none;
   background: transparent;
-}
-
-/* Raw .md source (matches editor source feel, not HTML preview) */
-.pyoink-content.pyoink-content-source {
-  max-width: none;
-  padding: 1rem 1.25rem 8rem;
-}
-
-.pyoink-md-source {
+  /* Let theme control readable width / padding via .markdown-preview-view */
+  width: 100%;
+  max-width: 100%;
   margin: 0;
   padding: 0;
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-  font-family: var(--font-text, var(--font-monospace, ui-monospace, monospace));
-  font-size: var(--font-text-size, 16px);
-  line-height: var(--line-height-normal, 1.6);
-  color: var(--text-normal);
-  tab-size: 4;
+  box-sizing: border-box;
 }
 
-.pyoink-md-source-code {
-  font: inherit;
-  color: inherit;
-  background: transparent;
-  white-space: inherit;
-  word-break: inherit;
+/* Mirror reading view metrics so layout matches the normal note */
+.pyoink-content.markdown-preview-view {
+  overflow: visible;
+  /* bottom room for floating toolbar */
+  padding-bottom: 7rem;
+}
+
+.pyoink-content.markdown-preview-view .markdown-preview-sizer {
+  /* theme uses --file-line-width when is-readable-line-width is set */
+  min-height: 100%;
+  padding-bottom: 2rem;
 }
 
 .pyoink-page.is-navigate .pyoink-content {

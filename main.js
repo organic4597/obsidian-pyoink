@@ -1333,12 +1333,12 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.noteEl.empty();
     try {
       const md = await this.app.vault.read(file);
-      this.renderSourceMarkdown(md);
+      await this.renderReadingView(md, file);
     } catch (e2) {
       inkLog("E_RENDER", e2);
       this.state = "error";
-      this.noteEl.setText("(read failed)");
-      new import_obsidian2.Notice("PyoInk: could not read note");
+      this.noteEl.setText("(render failed)");
+      new import_obsidian2.Notice("PyoInk: markdown render failed");
     }
     const loaded = await this.store.load(file.path);
     this.doc = loaded.doc;
@@ -1355,17 +1355,35 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.state = this.state === "error" ? "error" : "ready";
     this.rootEl.focus();
   }
-  /** Display vault file text as-is (source mode look), not HTML preview. */
-  renderSourceMarkdown(md) {
+  /**
+   * Render note like Obsidian Reading View so core/theme CSS applies
+   * (headings, lists, callouts, embeds, readable line width, etc.).
+   */
+  async renderReadingView(md, file) {
     this.noteEl.empty();
-    this.noteEl.addClass("pyoink-content-source");
-    const pre = this.noteEl.createEl("pre", { cls: "pyoink-md-source" });
-    const code = pre.createEl("code", { cls: "pyoink-md-source-code language-markdown" });
-    code.textContent = md.endsWith("\n") ? md : md;
+    this.noteEl.removeClass("pyoink-content-source");
+    this.noteEl.addClasses([
+      "markdown-preview-view",
+      "markdown-rendered",
+      "node-insert-event",
+      "is-readable-line-width",
+      "allow-fold-headings",
+      "allow-fold-lists"
+    ]);
+    const sizer = this.noteEl.createDiv({
+      cls: "markdown-preview-sizer markdown-preview-section"
+    });
+    sizer.createDiv({
+      cls: "markdown-preview-pusher",
+      attr: { style: "width: 1px; height: 0.1px; margin-bottom: 0;" }
+    });
+    await import_obsidian2.MarkdownRenderer.render(this.app, md, sizer, file.path, this);
+    this.wireInternalLinks();
   }
   wireInternalLinks() {
     this.noteEl.querySelectorAll("a.internal-link").forEach((a2) => {
       a2.addEventListener("click", (ev) => {
+        if (!this.gestures.navigateMode) return;
         ev.preventDefault();
         const href = a2.getAttribute("data-href") || a2.getAttribute("href") || "";
         if (href) {

@@ -1,5 +1,6 @@
 import {
   ItemView,
+  MarkdownRenderer,
   Notice,
   TFile,
   WorkspaceLeaf,
@@ -152,16 +153,15 @@ export class PyoInkView extends ItemView {
     this.syncToolbar();
     this.noteEl.empty();
 
-    // Show the note as raw .md source (same bytes as vault file).
-    // MarkdownRenderer HTML preview differs from the editor and was confusing.
+    // Reading-view style render so theme + MD layout match normal Obsidian.
     try {
       const md = await this.app.vault.read(file);
-      this.renderSourceMarkdown(md);
+      await this.renderReadingView(md, file);
     } catch (e) {
       inkLog("E_RENDER", e);
       this.state = "error";
-      this.noteEl.setText("(read failed)");
-      new Notice("PyoInk: could not read note");
+      this.noteEl.setText("(render failed)");
+      new Notice("PyoInk: markdown render failed");
     }
 
     const loaded = await this.store.load(file.path);
@@ -181,21 +181,40 @@ export class PyoInkView extends ItemView {
     this.rootEl.focus();
   }
 
-  /** Display vault file text as-is (source mode look), not HTML preview. */
-  private renderSourceMarkdown(md: string) {
+  /**
+   * Render note like Obsidian Reading View so core/theme CSS applies
+   * (headings, lists, callouts, embeds, readable line width, etc.).
+   */
+  private async renderReadingView(md: string, file: TFile) {
     this.noteEl.empty();
-    this.noteEl.addClass("pyoink-content-source");
-    // Preserve exact newlines / spaces like the .md file
-    const pre = this.noteEl.createEl("pre", { cls: "pyoink-md-source" });
-    const code = pre.createEl("code", { cls: "pyoink-md-source-code language-markdown" });
-    // textContent, not innerHTML — no escaping surprises, exact source
-    code.textContent = md.endsWith("\n") ? md : md;
+    this.noteEl.removeClass("pyoink-content-source");
+    // Classes Obsidian themes target for reading layout
+    this.noteEl.addClasses([
+      "markdown-preview-view",
+      "markdown-rendered",
+      "node-insert-event",
+      "is-readable-line-width",
+      "allow-fold-headings",
+      "allow-fold-lists",
+    ]);
+    // Sizer matches reading-view hierarchy (themes often style this)
+    const sizer = this.noteEl.createDiv({
+      cls: "markdown-preview-sizer markdown-preview-section",
+    });
+    // spacer top (reading view often has one)
+    sizer.createDiv({
+      cls: "markdown-preview-pusher",
+      attr: { style: "width: 1px; height: 0.1px; margin-bottom: 0;" },
+    });
+    await MarkdownRenderer.render(this.app, md, sizer, file.path, this);
+    this.wireInternalLinks();
   }
 
   private wireInternalLinks() {
-    // Source view has no HTML links; Nav mode still uses click-through hit-test on text.
     this.noteEl.querySelectorAll("a.internal-link").forEach((a) => {
       a.addEventListener("click", (ev) => {
+        // Only when navigate mode (content has pointer-events); otherwise canvas captures
+        if (!this.gestures.navigateMode) return;
         ev.preventDefault();
         const href = a.getAttribute("data-href") || a.getAttribute("href") || "";
         if (href) {
