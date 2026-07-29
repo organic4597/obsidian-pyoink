@@ -123,6 +123,35 @@ export class GestureRouter {
   }
 
   /**
+   * Pencil contact preempts all touch pan/pinch state.
+   * Fixes: after finger scroll, pen ink stops (stuck activeDrawId / fingerIds / capture).
+   */
+  preemptForPen(pointerId: number) {
+    this.fingerIds.clear();
+    this.multiFingerAnchor = null;
+    this.multiFingerMaxMove = 0;
+    this.pinch = null;
+    // Drop any non-pen pointer records
+    Array.from(this.pointers.entries()).forEach(([id, pev]) => {
+      if (id === pointerId) return;
+      if (pev.pointerType === "pen") return;
+      this.pointers.delete(id);
+    });
+    // Stuck draw lock (often a leftover touch id) blocks pen as E_PTR_SECONDARY
+    if (this.activeDrawId !== null && this.activeDrawId !== pointerId) {
+      inkLog("E_PTR_SECONDARY", "preempt_for_pen_clear");
+      this.clearActiveDraw();
+    }
+    // Ghost tip-down ids from hover quirks
+    Array.from(this.penDownIds).forEach((id) => {
+      if (id !== pointerId) this.penDownIds.delete(id);
+    });
+    this.penDownIds.add(pointerId);
+    this.lastPenAt = performance.now();
+    this.penDownAt = performance.now();
+  }
+
+  /**
    * Drop one pointer without side-effect shortcuts (scroll pan end, lost capture).
    * Fixes freeze where fingerIds never cleared after scroll-only gestures.
    */
@@ -138,6 +167,7 @@ export class GestureRouter {
     if (this.fingerIds.size === 0) {
       this.multiFingerAnchor = null;
       this.multiFingerMaxMove = 0;
+      this.pinch = null;
     }
   }
 
@@ -180,10 +210,11 @@ export class GestureRouter {
 
   onDown(ev: PointerEvent, canvasRect: DOMRect): GestureAction {
     // Stale multi-finger set from interrupted scroll freezes pan — scrub ghosts
-    if (this.fingerIds.size > 0 && !this.pointers.size) {
+    if (this.fingerIds.size > 0 && this.pointers.size === 0) {
       this.fingerIds.clear();
       this.multiFingerAnchor = null;
       this.multiFingerMaxMove = 0;
+      this.pinch = null;
     }
 
     this.pointers.set(ev.pointerId, ev);
@@ -194,8 +225,11 @@ export class GestureRouter {
 
     if (ev.pointerType === "pen") {
       // Contact only (not hover). Hover must not mark tip-down.
-      if (ev.buttons > 0 || (typeof ev.pressure === "number" && ev.pressure > 0)) {
-        this.penDownIds.add(ev.pointerId);
+      const contacting =
+        ev.buttons > 0 || (typeof ev.pressure === "number" && ev.pressure > 0);
+      if (contacting) {
+        // Pencil always wins over leftover touch pan/pinch locks
+        this.preemptForPen(ev.pointerId);
       }
       this.lastPenAt = performance.now();
       this.penDownAt = performance.now();
@@ -216,9 +250,6 @@ export class GestureRouter {
           const id = this.activeDrawId;
           this.clearActiveDraw();
           this.armMulti(sample, this.fingerIds.size);
-          // end touch-draw then start pinch/tap tracking
-          const pinch = this.beginPinchIfPossible(s);
-          if (pinch) return { type: "draw-end", pointerId: id };
           return { type: "draw-end", pointerId: id };
         }
         this.armMulti(sample, this.fingerIds.size);
@@ -233,11 +264,6 @@ export class GestureRouter {
       }
     }
 
-    // Pen never scrolls/pans in strict mode (ink only)
-    if (ev.pointerType === "pen" && s.strictPenTouchSeparate !== false) {
-      // fall through to draw
-    }
-
     if (this.navigateMode && ev.pointerType !== "pen") {
       return { type: "ignore" };
     }
@@ -246,9 +272,15 @@ export class GestureRouter {
       return { type: "scroll" };
     }
 
+    // Secondary pointer lock — pen already cleared via preemptForPen
     if (this.activeDrawId !== null && ev.pointerId !== this.activeDrawId) {
-      inkLog("E_PTR_SECONDARY");
-      return { type: "ignore" };
+      if (ev.pointerType === "pen") {
+        inkLog("E_PTR_SECONDARY", "pen_force_takeover");
+        this.clearActiveDraw();
+      } else {
+        inkLog("E_PTR_SECONDARY");
+        return { type: "ignore" };
+      }
     }
 
     if (ev.pointerType === "touch" && s.penOnlyInk !== false) {
@@ -525,7 +557,7 @@ export class GestureRouter {
 
   private touchPair(): { a: PointerEvent; b: PointerEvent } | null {
     if (this.fingerIds.size < 2) return null;
-    const ids = [...this.fingerIds];
+    const ids = Array.from(this.fingerIds);
     const a = this.pointers.get(ids[0]);
     const b = this.pointers.get(ids[1]);
     if (!a || !b) return null;
@@ -538,7 +570,7 @@ export class GestureRouter {
     if (!pair) return null;
     const dist = Math.hypot(pair.a.clientX - pair.b.clientX, pair.a.clientY - pair.b.clientY);
     if (dist < 8) return null;
-    const ids = [...this.fingerIds];
+    const ids = Array.from(this.fingerIds);
     this.pinch = {
       idA: ids[0],
       idB: ids[1],
@@ -560,7 +592,7 @@ export class GestureRouter {
     const dist = Math.hypot(pair.a.clientX - pair.b.clientX, pair.a.clientY - pair.b.clientY);
     if (dist < 8) return null;
     if (!this.pinch) {
-      const ids = [...this.fingerIds];
+      const ids = Array.from(this.fingerIds);
       this.pinch = {
         idA: ids[0],
         idB: ids[1],

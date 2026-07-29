@@ -800,6 +800,49 @@ export class PyoInkView extends ItemView {
     this.gestures.setViewZoom(z);
   }
 
+  /**
+   * After finger pan/zoom, leftover capture / activeDraw / non-ready state
+   * can make Pencil completely dead. Call on every pen pointerdown.
+   */
+  private ensurePenChannelLive(ev: PointerEvent) {
+    // Drop stuck finger pan capture so canvas receives pen cleanly
+    if (this.scrollTouchId != null) {
+      const id = this.scrollTouchId;
+      this.scrollTouchId = null;
+      this.gestures.releasePointer(id, "touch");
+      try {
+        this.canvas.releasePointerCapture(id);
+      } catch {
+        /* */
+      }
+      inkLog("E_SCROLL_STUCK", "pen_preempt");
+    }
+
+    // Never leave canvas non-interactive for pen (unless true navigate mode)
+    if (!this.gestures.navigateMode) {
+      this.canvas.classList.remove("is-pass-through");
+      this.canvas.style.pointerEvents = "auto";
+    }
+
+    // saving/loading/error must not eat Pencil forever
+    if (this.state !== "ready" && this.state !== "stroking") {
+      inkLog("E_PTR_LOST", `pen_revive_state_${this.state}`);
+      this.state = "ready";
+    }
+
+    // Engine mid-stroke without gesture lock → finish orphan stroke
+    if (this.engine.isStroking() && this.gestures.getActiveDrawId() === null) {
+      try {
+        this.engine.end();
+      } catch {
+        this.engine.cancel();
+      }
+      this.cacheValid = false;
+    }
+
+    this.gestures.preemptForPen(ev.pointerId);
+  }
+
   cycleTool() {
     this.finishStrokeIfNeeded();
     this.setNavigate(false);
@@ -1066,8 +1109,13 @@ export class PyoInkView extends ItemView {
     };
 
     c.addEventListener("pointerdown", (ev) => {
-      if (this.state !== "ready" && this.state !== "stroking") return;
-      // navigate: let events fall through (canvas pass-through CSS)
+      // Pencil must work even if a prior save/load left a non-ready state
+      if (ev.pointerType === "pen") {
+        this.ensurePenChannelLive(ev);
+      } else if (this.state !== "ready" && this.state !== "stroking") {
+        return;
+      }
+      // navigate: let non-pen events fall through (canvas pass-through CSS)
       if (this.gestures.navigateMode && ev.pointerType !== "pen") return;
 
       // New contact while previous pan stuck → unlock

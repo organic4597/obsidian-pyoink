@@ -582,6 +582,31 @@ var GestureRouter = class {
     this.pinch = null;
   }
   /**
+   * Pencil contact preempts all touch pan/pinch state.
+   * Fixes: after finger scroll, pen ink stops (stuck activeDrawId / fingerIds / capture).
+   */
+  preemptForPen(pointerId) {
+    this.fingerIds.clear();
+    this.multiFingerAnchor = null;
+    this.multiFingerMaxMove = 0;
+    this.pinch = null;
+    Array.from(this.pointers.entries()).forEach(([id, pev]) => {
+      if (id === pointerId) return;
+      if (pev.pointerType === "pen") return;
+      this.pointers.delete(id);
+    });
+    if (this.activeDrawId !== null && this.activeDrawId !== pointerId) {
+      inkLog("E_PTR_SECONDARY", "preempt_for_pen_clear");
+      this.clearActiveDraw();
+    }
+    Array.from(this.penDownIds).forEach((id) => {
+      if (id !== pointerId) this.penDownIds.delete(id);
+    });
+    this.penDownIds.add(pointerId);
+    this.lastPenAt = performance.now();
+    this.penDownAt = performance.now();
+  }
+  /**
    * Drop one pointer without side-effect shortcuts (scroll pan end, lost capture).
    * Fixes freeze where fingerIds never cleared after scroll-only gestures.
    */
@@ -597,6 +622,7 @@ var GestureRouter = class {
     if (this.fingerIds.size === 0) {
       this.multiFingerAnchor = null;
       this.multiFingerMaxMove = 0;
+      this.pinch = null;
     }
   }
   /** Hover / barrel proximity: buttons===0 and no contact pressure. */
@@ -630,10 +656,11 @@ var GestureRouter = class {
     return !s2.allowFingerDraw;
   }
   onDown(ev, canvasRect) {
-    if (this.fingerIds.size > 0 && !this.pointers.size) {
+    if (this.fingerIds.size > 0 && this.pointers.size === 0) {
       this.fingerIds.clear();
       this.multiFingerAnchor = null;
       this.multiFingerMaxMove = 0;
+      this.pinch = null;
     }
     this.pointers.set(ev.pointerId, ev);
     const s2 = this.settings();
@@ -641,8 +668,9 @@ var GestureRouter = class {
     this.downSample = sample;
     this.movedPx = 0;
     if (ev.pointerType === "pen") {
-      if (ev.buttons > 0 || typeof ev.pressure === "number" && ev.pressure > 0) {
-        this.penDownIds.add(ev.pointerId);
+      const contacting = ev.buttons > 0 || typeof ev.pressure === "number" && ev.pressure > 0;
+      if (contacting) {
+        this.preemptForPen(ev.pointerId);
       }
       this.lastPenAt = performance.now();
       this.penDownAt = performance.now();
@@ -658,8 +686,6 @@ var GestureRouter = class {
           const id = this.activeDrawId;
           this.clearActiveDraw();
           this.armMulti(sample, this.fingerIds.size);
-          const pinch2 = this.beginPinchIfPossible(s2);
-          if (pinch2) return { type: "draw-end", pointerId: id };
           return { type: "draw-end", pointerId: id };
         }
         this.armMulti(sample, this.fingerIds.size);
@@ -671,8 +697,6 @@ var GestureRouter = class {
         return { type: "scroll" };
       }
     }
-    if (ev.pointerType === "pen" && s2.strictPenTouchSeparate !== false) {
-    }
     if (this.navigateMode && ev.pointerType !== "pen") {
       return { type: "ignore" };
     }
@@ -680,8 +704,13 @@ var GestureRouter = class {
       return { type: "scroll" };
     }
     if (this.activeDrawId !== null && ev.pointerId !== this.activeDrawId) {
-      inkLog("E_PTR_SECONDARY");
-      return { type: "ignore" };
+      if (ev.pointerType === "pen") {
+        inkLog("E_PTR_SECONDARY", "pen_force_takeover");
+        this.clearActiveDraw();
+      } else {
+        inkLog("E_PTR_SECONDARY");
+        return { type: "ignore" };
+      }
     }
     if (ev.pointerType === "touch" && s2.penOnlyInk !== false) {
       return { type: "scroll" };
@@ -879,7 +908,7 @@ var GestureRouter = class {
   }
   touchPair() {
     if (this.fingerIds.size < 2) return null;
-    const ids = [...this.fingerIds];
+    const ids = Array.from(this.fingerIds);
     const a2 = this.pointers.get(ids[0]);
     const b2 = this.pointers.get(ids[1]);
     if (!a2 || !b2) return null;
@@ -891,7 +920,7 @@ var GestureRouter = class {
     if (!pair) return null;
     const dist = Math.hypot(pair.a.clientX - pair.b.clientX, pair.a.clientY - pair.b.clientY);
     if (dist < 8) return null;
-    const ids = [...this.fingerIds];
+    const ids = Array.from(this.fingerIds);
     this.pinch = {
       idA: ids[0],
       idB: ids[1],
@@ -912,7 +941,7 @@ var GestureRouter = class {
     const dist = Math.hypot(pair.a.clientX - pair.b.clientX, pair.a.clientY - pair.b.clientY);
     if (dist < 8) return null;
     if (!this.pinch) {
-      const ids = [...this.fingerIds];
+      const ids = Array.from(this.fingerIds);
       this.pinch = {
         idA: ids[0],
         idB: ids[1],
@@ -2060,6 +2089,39 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.pageEl.style.transformOrigin = "0 0";
     this.gestures.setViewZoom(z);
   }
+  /**
+   * After finger pan/zoom, leftover capture / activeDraw / non-ready state
+   * can make Pencil completely dead. Call on every pen pointerdown.
+   */
+  ensurePenChannelLive(ev) {
+    if (this.scrollTouchId != null) {
+      const id = this.scrollTouchId;
+      this.scrollTouchId = null;
+      this.gestures.releasePointer(id, "touch");
+      try {
+        this.canvas.releasePointerCapture(id);
+      } catch {
+      }
+      inkLog("E_SCROLL_STUCK", "pen_preempt");
+    }
+    if (!this.gestures.navigateMode) {
+      this.canvas.classList.remove("is-pass-through");
+      this.canvas.style.pointerEvents = "auto";
+    }
+    if (this.state !== "ready" && this.state !== "stroking") {
+      inkLog("E_PTR_LOST", `pen_revive_state_${this.state}`);
+      this.state = "ready";
+    }
+    if (this.engine.isStroking() && this.gestures.getActiveDrawId() === null) {
+      try {
+        this.engine.end();
+      } catch {
+        this.engine.cancel();
+      }
+      this.cacheValid = false;
+    }
+    this.gestures.preemptForPen(ev.pointerId);
+  }
   cycleTool() {
     this.finishStrokeIfNeeded();
     this.setNavigate(false);
@@ -2296,7 +2358,11 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       inkLog("E_SCROLL_STUCK", reason);
     };
     c2.addEventListener("pointerdown", (ev) => {
-      if (this.state !== "ready" && this.state !== "stroking") return;
+      if (ev.pointerType === "pen") {
+        this.ensurePenChannelLive(ev);
+      } else if (this.state !== "ready" && this.state !== "stroking") {
+        return;
+      }
       if (this.gestures.navigateMode && ev.pointerType !== "pen") return;
       if (this.scrollTouchId != null && this.scrollTouchId !== ev.pointerId) {
         forceClearScroll("new_pointer_down");
