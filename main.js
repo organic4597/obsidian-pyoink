@@ -1478,6 +1478,14 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.scrollTouchId = null;
     this.lastScrollY = 0;
     this.lastScrollX = 0;
+    /** Finger pan velocity (px/ms) for fling inertia */
+    this.scrollVelX = 0;
+    this.scrollVelY = 0;
+    this.scrollLastT = 0;
+    this.flingRaf = 0;
+    this.panRaf = 0;
+    this.panPendingX = 0;
+    this.panPendingY = 0;
     this.rgbPanelOpen = false;
     this.rgbPanelEl = null;
     this.engine = new StrokeEngine(plugin.settings);
@@ -2104,6 +2112,18 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       }
       inkLog("E_SCROLL_STUCK", "pen_preempt");
     }
+    if (this.flingRaf) {
+      cancelAnimationFrame(this.flingRaf);
+      this.flingRaf = 0;
+    }
+    this.scrollVelX = 0;
+    this.scrollVelY = 0;
+    if (this.panRaf) {
+      cancelAnimationFrame(this.panRaf);
+      this.panRaf = 0;
+      this.panPendingX = 0;
+      this.panPendingY = 0;
+    }
     if (!this.gestures.navigateMode) {
       this.canvas.classList.remove("is-pass-through");
       this.canvas.style.pointerEvents = "auto";
@@ -2336,9 +2356,69 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   bindPointer() {
     const c2 = this.canvas;
+    const stopFling = () => {
+      if (this.flingRaf) {
+        cancelAnimationFrame(this.flingRaf);
+        this.flingRaf = 0;
+      }
+      this.scrollVelX = 0;
+      this.scrollVelY = 0;
+    };
+    const flushPan = () => {
+      this.panRaf = 0;
+      if (this.panPendingX === 0 && this.panPendingY === 0) return;
+      const dx = this.panPendingX;
+      const dy = this.panPendingY;
+      this.panPendingX = 0;
+      this.panPendingY = 0;
+      const gain = 1.12;
+      this.scrollEl.scrollLeft += dx * gain;
+      this.scrollEl.scrollTop += dy * gain;
+    };
+    const queuePan = (dx, dy) => {
+      this.panPendingX += dx;
+      this.panPendingY += dy;
+      if (!this.panRaf) {
+        this.panRaf = requestAnimationFrame(flushPan);
+      }
+    };
+    const startFling = () => {
+      stopFling();
+      let vx = this.scrollVelX * 16 * 1.15;
+      let vy = this.scrollVelY * 16 * 1.15;
+      const maxV = 80;
+      const sp = Math.hypot(vx, vy);
+      if (sp < 1.2) return;
+      if (sp > maxV) {
+        const s2 = maxV / sp;
+        vx *= s2;
+        vy *= s2;
+      }
+      const friction = 0.92;
+      const step = () => {
+        vx *= friction;
+        vy *= friction;
+        if (Math.hypot(vx, vy) < 0.35) {
+          this.flingRaf = 0;
+          this.scrollVelX = 0;
+          this.scrollVelY = 0;
+          return;
+        }
+        this.scrollEl.scrollLeft += vx;
+        this.scrollEl.scrollTop += vy;
+        this.flingRaf = requestAnimationFrame(step);
+      };
+      this.flingRaf = requestAnimationFrame(step);
+    };
     const endScroll = (ev) => {
       if (this.scrollTouchId !== ev.pointerId) return false;
       this.scrollTouchId = null;
+      if (this.panRaf) {
+        cancelAnimationFrame(this.panRaf);
+        this.panRaf = 0;
+        flushPan();
+      }
+      startFling();
       this.gestures.releasePointer(ev.pointerId, ev.pointerType);
       try {
         c2.releasePointerCapture(ev.pointerId);
@@ -2350,6 +2430,13 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       if (this.scrollTouchId == null) return;
       const id = this.scrollTouchId;
       this.scrollTouchId = null;
+      stopFling();
+      if (this.panRaf) {
+        cancelAnimationFrame(this.panRaf);
+        this.panRaf = 0;
+        this.panPendingX = 0;
+        this.panPendingY = 0;
+      }
       this.gestures.releasePointer(id, "touch");
       try {
         c2.releasePointerCapture(id);
@@ -2359,6 +2446,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     };
     c2.addEventListener("pointerdown", (ev) => {
       if (ev.pointerType === "pen") {
+        stopFling();
         this.ensurePenChannelLive(ev);
       } else if (this.state !== "ready" && this.state !== "stroking") {
         return;
@@ -2370,9 +2458,15 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       const rect = c2.getBoundingClientRect();
       const action = this.gestures.onDown(ev, rect);
       if (action.type === "scroll" && (ev.pointerType === "touch" || ev.pointerType === "mouse")) {
+        stopFling();
         this.scrollTouchId = ev.pointerId;
         this.lastScrollY = ev.clientY;
         this.lastScrollX = ev.clientX;
+        this.scrollLastT = performance.now();
+        this.scrollVelX = 0;
+        this.scrollVelY = 0;
+        this.panPendingX = 0;
+        this.panPendingY = 0;
         try {
           c2.setPointerCapture(ev.pointerId);
         } catch {
@@ -2384,10 +2478,31 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     });
     c2.addEventListener("pointermove", (ev) => {
       if (this.scrollTouchId === ev.pointerId) {
-        this.scrollEl.scrollTop += this.lastScrollY - ev.clientY;
-        this.scrollEl.scrollLeft += this.lastScrollX - ev.clientX;
-        this.lastScrollY = ev.clientY;
-        this.lastScrollX = ev.clientX;
+        const samples = typeof ev.getCoalescedEvents === "function" && ev.getCoalescedEvents().length ? ev.getCoalescedEvents() : [ev];
+        let lx = this.lastScrollX;
+        let ly = this.lastScrollY;
+        let t0 = this.scrollLastT || performance.now();
+        let dxSum = 0;
+        let dySum = 0;
+        for (const s2 of samples) {
+          const dx = lx - s2.clientX;
+          const dy = ly - s2.clientY;
+          dxSum += dx;
+          dySum += dy;
+          lx = s2.clientX;
+          ly = s2.clientY;
+        }
+        const t1 = performance.now();
+        const dt = Math.max(4, t1 - t0);
+        const instVx = dxSum / dt;
+        const instVy = dySum / dt;
+        const a2 = 0.35;
+        this.scrollVelX = this.scrollVelX * (1 - a2) + instVx * a2;
+        this.scrollVelY = this.scrollVelY * (1 - a2) + instVy * a2;
+        this.lastScrollX = lx;
+        this.lastScrollY = ly;
+        this.scrollLastT = t1;
+        queuePan(dxSum, dySum);
         ev.preventDefault();
         return;
       }

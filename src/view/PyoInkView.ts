@@ -91,6 +91,14 @@ export class PyoInkView extends ItemView {
   private scrollTouchId: number | null = null;
   private lastScrollY = 0;
   private lastScrollX = 0;
+  /** Finger pan velocity (px/ms) for fling inertia */
+  private scrollVelX = 0;
+  private scrollVelY = 0;
+  private scrollLastT = 0;
+  private flingRaf = 0;
+  private panRaf = 0;
+  private panPendingX = 0;
+  private panPendingY = 0;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -817,6 +825,18 @@ export class PyoInkView extends ItemView {
       }
       inkLog("E_SCROLL_STUCK", "pen_preempt");
     }
+    if (this.flingRaf) {
+      cancelAnimationFrame(this.flingRaf);
+      this.flingRaf = 0;
+    }
+    this.scrollVelX = 0;
+    this.scrollVelY = 0;
+    if (this.panRaf) {
+      cancelAnimationFrame(this.panRaf);
+      this.panRaf = 0;
+      this.panPendingX = 0;
+      this.panPendingY = 0;
+    }
 
     // Never leave canvas non-interactive for pen (unless true navigate mode)
     if (!this.gestures.navigateMode) {
@@ -1082,9 +1102,76 @@ export class PyoInkView extends ItemView {
   private bindPointer() {
     const c = this.canvas;
 
+    const stopFling = () => {
+      if (this.flingRaf) {
+        cancelAnimationFrame(this.flingRaf);
+        this.flingRaf = 0;
+      }
+      this.scrollVelX = 0;
+      this.scrollVelY = 0;
+    };
+
+    const flushPan = () => {
+      this.panRaf = 0;
+      if (this.panPendingX === 0 && this.panPendingY === 0) return;
+      const dx = this.panPendingX;
+      const dy = this.panPendingY;
+      this.panPendingX = 0;
+      this.panPendingY = 0;
+      // Slight gain so ink-mode finger pan feels closer to native note scroll
+      const gain = 1.12;
+      this.scrollEl.scrollLeft += dx * gain;
+      this.scrollEl.scrollTop += dy * gain;
+    };
+
+    const queuePan = (dx: number, dy: number) => {
+      this.panPendingX += dx;
+      this.panPendingY += dy;
+      if (!this.panRaf) {
+        this.panRaf = requestAnimationFrame(flushPan);
+      }
+    };
+
+    const startFling = () => {
+      stopFling();
+      // Convert px/ms → approx px/frame at 60fps, with a bit of boost
+      let vx = this.scrollVelX * 16 * 1.15;
+      let vy = this.scrollVelY * 16 * 1.15;
+      const maxV = 80;
+      const sp = Math.hypot(vx, vy);
+      if (sp < 1.2) return;
+      if (sp > maxV) {
+        const s = maxV / sp;
+        vx *= s;
+        vy *= s;
+      }
+      const friction = 0.92;
+      const step = () => {
+        vx *= friction;
+        vy *= friction;
+        if (Math.hypot(vx, vy) < 0.35) {
+          this.flingRaf = 0;
+          this.scrollVelX = 0;
+          this.scrollVelY = 0;
+          return;
+        }
+        this.scrollEl.scrollLeft += vx;
+        this.scrollEl.scrollTop += vy;
+        this.flingRaf = requestAnimationFrame(step);
+      };
+      this.flingRaf = requestAnimationFrame(step);
+    };
+
     const endScroll = (ev: PointerEvent) => {
       if (this.scrollTouchId !== ev.pointerId) return false;
       this.scrollTouchId = null;
+      // flush last pan delta then inertia
+      if (this.panRaf) {
+        cancelAnimationFrame(this.panRaf);
+        this.panRaf = 0;
+        flushPan();
+      }
+      startFling();
       // CRITICAL: clear fingerIds left from scroll-only onDown (freeze after N pans)
       this.gestures.releasePointer(ev.pointerId, ev.pointerType);
       try {
@@ -1099,6 +1186,13 @@ export class PyoInkView extends ItemView {
       if (this.scrollTouchId == null) return;
       const id = this.scrollTouchId;
       this.scrollTouchId = null;
+      stopFling();
+      if (this.panRaf) {
+        cancelAnimationFrame(this.panRaf);
+        this.panRaf = 0;
+        this.panPendingX = 0;
+        this.panPendingY = 0;
+      }
       this.gestures.releasePointer(id, "touch");
       try {
         c.releasePointerCapture(id);
@@ -1111,6 +1205,7 @@ export class PyoInkView extends ItemView {
     c.addEventListener("pointerdown", (ev) => {
       // Pencil must work even if a prior save/load left a non-ready state
       if (ev.pointerType === "pen") {
+        stopFling();
         this.ensurePenChannelLive(ev);
       } else if (this.state !== "ready" && this.state !== "stroking") {
         return;
@@ -1126,9 +1221,15 @@ export class PyoInkView extends ItemView {
       const rect = c.getBoundingClientRect();
       const action = this.gestures.onDown(ev, rect);
       if (action.type === "scroll" && (ev.pointerType === "touch" || ev.pointerType === "mouse")) {
+        stopFling();
         this.scrollTouchId = ev.pointerId;
         this.lastScrollY = ev.clientY;
         this.lastScrollX = ev.clientX;
+        this.scrollLastT = performance.now();
+        this.scrollVelX = 0;
+        this.scrollVelY = 0;
+        this.panPendingX = 0;
+        this.panPendingY = 0;
         try {
           c.setPointerCapture(ev.pointerId);
         } catch {
@@ -1142,11 +1243,36 @@ export class PyoInkView extends ItemView {
 
     c.addEventListener("pointermove", (ev) => {
       if (this.scrollTouchId === ev.pointerId) {
-        // 1:1 pan — finger up → content up (natural)
-        this.scrollEl.scrollTop += this.lastScrollY - ev.clientY;
-        this.scrollEl.scrollLeft += this.lastScrollX - ev.clientX;
-        this.lastScrollY = ev.clientY;
-        this.lastScrollX = ev.clientX;
+        // Use coalesced samples when available (smoother on iPad)
+        const samples =
+          typeof ev.getCoalescedEvents === "function" && ev.getCoalescedEvents().length
+            ? ev.getCoalescedEvents()
+            : [ev];
+        let lx = this.lastScrollX;
+        let ly = this.lastScrollY;
+        let t0 = this.scrollLastT || performance.now();
+        let dxSum = 0;
+        let dySum = 0;
+        for (const s of samples) {
+          const dx = lx - s.clientX; // finger right → content left
+          const dy = ly - s.clientY;
+          dxSum += dx;
+          dySum += dy;
+          lx = s.clientX;
+          ly = s.clientY;
+        }
+        const t1 = performance.now();
+        const dt = Math.max(4, t1 - t0);
+        // EMA velocity (px/ms)
+        const instVx = dxSum / dt;
+        const instVy = dySum / dt;
+        const a = 0.35;
+        this.scrollVelX = this.scrollVelX * (1 - a) + instVx * a;
+        this.scrollVelY = this.scrollVelY * (1 - a) + instVy * a;
+        this.lastScrollX = lx;
+        this.lastScrollY = ly;
+        this.scrollLastT = t1;
+        queuePan(dxSum, dySum);
         ev.preventDefault();
         return;
       }
