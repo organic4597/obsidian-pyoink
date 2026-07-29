@@ -66,9 +66,15 @@ export class PyoInkView extends ItemView {
   private cacheCanvas: HTMLCanvasElement | null = null;
   private cacheValid = false;
   private toolbarEl!: HTMLElement;
+  /** Excalidraw-style left properties rail (color / size). */
+  private propsEl!: HTMLElement;
+  private propsBodyEl!: HTMLElement;
   private colorRowEl!: HTMLElement;
   private rgbRowEl!: HTMLElement;
+  private widthRowEl!: HTMLElement;
   private navBtn: HTMLButtonElement | null = null;
+  private propsToggleBtn: HTMLButtonElement | null = null;
+  private propsCollapsed = false;
   private dragBound = false;
   private cursorX = -1;
   private cursorY = -1;
@@ -77,7 +83,6 @@ export class PyoInkView extends ItemView {
   private cursorPressure = 0.5;
   private undoBtn: HTMLButtonElement | null = null;
   private redoBtn: HTMLButtonElement | null = null;
-  private widthRowEl!: HTMLElement;
   /** Content zoom (1 = 100%). Touch pinch / ctrl-wheel. */
   private viewZoom = 1;
 
@@ -262,13 +267,20 @@ export class PyoInkView extends ItemView {
   }
 
   private buildToolbar() {
+    // ——— Excalidraw-like: compact tool island (draggable) ———
     this.toolbarEl = this.rootEl.createDiv({ cls: "pyoink-toolbar" });
-    this.applyToolbarPos();
+    // Default near bottom-center if never moved
+    if (this.plugin.settings.toolbarYPct == null || this.plugin.settings.toolbarYPct > 96) {
+      this.plugin.settings.toolbarYPct = 90;
+    }
+    if (this.plugin.settings.toolbarXPct == null) {
+      this.plugin.settings.toolbarXPct = 50;
+    }
 
     const drag = this.toolbarEl.createDiv({ cls: "pyoink-tb-drag" });
     this.bindToolbarDrag(drag);
 
-    const tools = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
+    const tools = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-tb-tools" });
     this.iconBtn(tools, "pen", "pen", "Pen");
     this.iconBtn(tools, "highlighter", "highlighter", "Highlighter");
     this.iconBtn(tools, "eraser", "eraser", "Eraser");
@@ -277,6 +289,9 @@ export class PyoInkView extends ItemView {
     this.navBtn.title = "Navigate (links)";
     this.setSvgIcon(this.navBtn, "nav");
     this.navBtn.onclick = () => this.setNavigate(!this.gestures.navigateMode);
+
+    const sep = tools.createSpan({ cls: "pyoink-tb-sep" });
+    sep.setAttr("aria-hidden", "true");
 
     this.undoBtn = tools.createEl("button", { cls: "pyoink-tb-icon" });
     this.undoBtn.title = "Undo";
@@ -304,6 +319,16 @@ export class PyoInkView extends ItemView {
       }
     };
 
+    const zOut = tools.createEl("button", { cls: "pyoink-tb-icon", text: "−" });
+    zOut.title = "Zoom out";
+    zOut.onclick = () => this.bumpZoom(1 / 1.15);
+    const zReset = tools.createEl("button", { cls: "pyoink-tb-icon", text: "1×" });
+    zReset.title = "Reset zoom";
+    zReset.onclick = () => this.setZoom(1);
+    const zIn = tools.createEl("button", { cls: "pyoink-tb-icon", text: "+" });
+    zIn.title = "Zoom in";
+    zIn.onclick = () => this.bumpZoom(1.15);
+
     const exit = tools.createEl("button", { cls: "pyoink-tb-icon" });
     exit.title = "Leave (save on exit)";
     this.setSvgIcon(exit, "exit");
@@ -315,26 +340,64 @@ export class PyoInkView extends ItemView {
       if (this.file) await this.leaf.openFile(this.file);
     };
 
-    // Zoom controls (also pinch with two fingers)
-    const zOut = tools.createEl("button", { cls: "pyoink-tb-icon", text: "−" });
-    zOut.title = "Zoom out";
-    zOut.onclick = () => this.bumpZoom(1 / 1.15);
-    const zReset = tools.createEl("button", { cls: "pyoink-tb-icon", text: "1:1" });
-    zReset.title = "Reset zoom";
-    zReset.onclick = () => this.setZoom(1);
-    const zIn = tools.createEl("button", { cls: "pyoink-tb-icon", text: "+" });
-    zIn.title = "Zoom in";
-    zIn.onclick = () => this.bumpZoom(1.15);
+    // ——— Left properties rail (Excalidraw style panel) ———
+    this.propsEl = this.rootEl.createDiv({ cls: "pyoink-props" });
+    this.propsToggleBtn = this.propsEl.createEl("button", {
+      cls: "pyoink-props-toggle",
+      attr: { title: "Style panel", "aria-label": "Toggle style panel" },
+    });
+    this.propsToggleBtn.textContent = "‹";
+    this.propsToggleBtn.onclick = (ev) => {
+      ev.preventDefault();
+      this.propsCollapsed = !this.propsCollapsed;
+      this.syncPropsChrome();
+    };
 
-    this.colorRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-color-row" });
-    this.rgbRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-rgb-row" });
-    this.widthRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-width-row" });
+    this.propsBodyEl = this.propsEl.createDiv({ cls: "pyoink-props-body" });
+    this.propsBodyEl.createDiv({
+      cls: "pyoink-props-title",
+      text: "Style",
+    });
+
+    this.colorRowEl = this.propsBodyEl.createDiv({
+      cls: "pyoink-tb-row pyoink-color-row",
+    });
+    this.rgbRowEl = this.propsBodyEl.createDiv({
+      cls: "pyoink-tb-row pyoink-rgb-row",
+    });
+    this.widthRowEl = this.propsBodyEl.createDiv({
+      cls: "pyoink-tb-row pyoink-width-row",
+    });
+
     this.rebuildColorRow();
     this.rebuildRgbRow();
     this.rebuildWidthRow();
     this.syncToolbar();
-    // Palette open/close changes height — keep remote inside bounds
+    this.syncPropsChrome();
     this.applyToolbarPos();
+  }
+
+  private syncPropsChrome() {
+    if (!this.propsEl) return;
+    const tool = this.gestures.getTool();
+    const hideForNav = this.gestures.navigateMode;
+    // Hide entire rail in navigate mode
+    this.propsEl.style.display = hideForNav ? "none" : "";
+    this.propsEl.classList.toggle("is-collapsed", this.propsCollapsed);
+    if (this.propsToggleBtn) {
+      this.propsToggleBtn.textContent = this.propsCollapsed ? "›" : "‹";
+      this.propsToggleBtn.title = this.propsCollapsed
+        ? "Show style panel"
+        : "Hide style panel";
+    }
+    // Eraser: still show width, hide colors
+    if (this.colorRowEl) {
+      this.colorRowEl.style.display =
+        tool === "eraser" || this.propsCollapsed ? "none" : "";
+    }
+    if (this.rgbRowEl && this.propsCollapsed) {
+      this.rgbRowEl.style.display = "none";
+    }
   }
 
   private setSvgIcon(el: HTMLElement, key: string) {
@@ -789,15 +852,15 @@ export class PyoInkView extends ItemView {
   private clampToolbarTopLeft(left: number, top: number): { left: number; top: number } {
     const rootW = this.rootEl.clientWidth || 1;
     const rootH = this.rootEl.clientHeight || 1;
-    const tbW = this.toolbarEl.offsetWidth || 200;
-    const tbH = this.toolbarEl.offsetHeight || 80;
-    const pad = 10;
-    // Drag handle is ~18px at top — keep at least that strip inside + pad
+    const tbW = this.toolbarEl.offsetWidth || 280;
+    const tbH = this.toolbarEl.offsetHeight || 56;
+    const pad = 12;
+    // Leave room for left props rail (~56 when collapsed, ~220 open)
+    const leftPad = this.propsCollapsed || this.gestures.navigateMode ? pad : Math.min(230, rootW * 0.4);
     const minTop = pad;
-    const maxTop = Math.max(minTop, rootH - Math.min(tbH, rootH * 0.55) - pad);
-    // Never let center go into the top 8% in a way that hides the handle:
-    // maxTop already keeps handle visible; also cap how high the TOP edge can go.
-    const minLeft = pad;
+    // Tool island is short — keep fully inside; never under top chrome
+    const maxTop = Math.max(minTop, rootH - tbH - pad);
+    const minLeft = leftPad;
     const maxLeft = Math.max(minLeft, rootW - tbW - pad);
     return {
       left: Math.min(maxLeft, Math.max(minLeft, left)),
@@ -1126,6 +1189,7 @@ export class PyoInkView extends ItemView {
     if (this.navBtn) this.navBtn.classList.toggle("is-active", this.gestures.navigateMode);
     if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
     if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
+    this.syncPropsChrome();
   }
 
   private bindKeys() {

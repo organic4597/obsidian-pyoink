@@ -1458,6 +1458,8 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.cacheCanvas = null;
     this.cacheValid = false;
     this.navBtn = null;
+    this.propsToggleBtn = null;
+    this.propsCollapsed = false;
     this.dragBound = false;
     this.cursorX = -1;
     this.cursorY = -1;
@@ -1625,10 +1627,15 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   buildToolbar() {
     this.toolbarEl = this.rootEl.createDiv({ cls: "pyoink-toolbar" });
-    this.applyToolbarPos();
+    if (this.plugin.settings.toolbarYPct == null || this.plugin.settings.toolbarYPct > 96) {
+      this.plugin.settings.toolbarYPct = 90;
+    }
+    if (this.plugin.settings.toolbarXPct == null) {
+      this.plugin.settings.toolbarXPct = 50;
+    }
     const drag = this.toolbarEl.createDiv({ cls: "pyoink-tb-drag" });
     this.bindToolbarDrag(drag);
-    const tools = this.toolbarEl.createDiv({ cls: "pyoink-tb-row" });
+    const tools = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-tb-tools" });
     this.iconBtn(tools, "pen", "pen", "Pen");
     this.iconBtn(tools, "highlighter", "highlighter", "Highlighter");
     this.iconBtn(tools, "eraser", "eraser", "Eraser");
@@ -1636,6 +1643,8 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.navBtn.title = "Navigate (links)";
     this.setSvgIcon(this.navBtn, "nav");
     this.navBtn.onclick = () => this.setNavigate(!this.gestures.navigateMode);
+    const sep = tools.createSpan({ cls: "pyoink-tb-sep" });
+    sep.setAttr("aria-hidden", "true");
     this.undoBtn = tools.createEl("button", { cls: "pyoink-tb-icon" });
     this.undoBtn.title = "Undo";
     this.setSvgIcon(this.undoBtn, "undo");
@@ -1660,6 +1669,15 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         this.syncToolbar();
       }
     };
+    const zOut = tools.createEl("button", { cls: "pyoink-tb-icon", text: "\u2212" });
+    zOut.title = "Zoom out";
+    zOut.onclick = () => this.bumpZoom(1 / 1.15);
+    const zReset = tools.createEl("button", { cls: "pyoink-tb-icon", text: "1\xD7" });
+    zReset.title = "Reset zoom";
+    zReset.onclick = () => this.setZoom(1);
+    const zIn = tools.createEl("button", { cls: "pyoink-tb-icon", text: "+" });
+    zIn.title = "Zoom in";
+    zIn.onclick = () => this.bumpZoom(1.15);
     const exit = tools.createEl("button", { cls: "pyoink-tb-icon" });
     exit.title = "Leave (save on exit)";
     this.setSvgIcon(exit, "exit");
@@ -1670,23 +1688,54 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       }
       if (this.file) await this.leaf.openFile(this.file);
     };
-    const zOut = tools.createEl("button", { cls: "pyoink-tb-icon", text: "\u2212" });
-    zOut.title = "Zoom out";
-    zOut.onclick = () => this.bumpZoom(1 / 1.15);
-    const zReset = tools.createEl("button", { cls: "pyoink-tb-icon", text: "1:1" });
-    zReset.title = "Reset zoom";
-    zReset.onclick = () => this.setZoom(1);
-    const zIn = tools.createEl("button", { cls: "pyoink-tb-icon", text: "+" });
-    zIn.title = "Zoom in";
-    zIn.onclick = () => this.bumpZoom(1.15);
-    this.colorRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-color-row" });
-    this.rgbRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-rgb-row" });
-    this.widthRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-width-row" });
+    this.propsEl = this.rootEl.createDiv({ cls: "pyoink-props" });
+    this.propsToggleBtn = this.propsEl.createEl("button", {
+      cls: "pyoink-props-toggle",
+      attr: { title: "Style panel", "aria-label": "Toggle style panel" }
+    });
+    this.propsToggleBtn.textContent = "\u2039";
+    this.propsToggleBtn.onclick = (ev) => {
+      ev.preventDefault();
+      this.propsCollapsed = !this.propsCollapsed;
+      this.syncPropsChrome();
+    };
+    this.propsBodyEl = this.propsEl.createDiv({ cls: "pyoink-props-body" });
+    this.propsBodyEl.createDiv({
+      cls: "pyoink-props-title",
+      text: "Style"
+    });
+    this.colorRowEl = this.propsBodyEl.createDiv({
+      cls: "pyoink-tb-row pyoink-color-row"
+    });
+    this.rgbRowEl = this.propsBodyEl.createDiv({
+      cls: "pyoink-tb-row pyoink-rgb-row"
+    });
+    this.widthRowEl = this.propsBodyEl.createDiv({
+      cls: "pyoink-tb-row pyoink-width-row"
+    });
     this.rebuildColorRow();
     this.rebuildRgbRow();
     this.rebuildWidthRow();
     this.syncToolbar();
+    this.syncPropsChrome();
     this.applyToolbarPos();
+  }
+  syncPropsChrome() {
+    if (!this.propsEl) return;
+    const tool = this.gestures.getTool();
+    const hideForNav = this.gestures.navigateMode;
+    this.propsEl.style.display = hideForNav ? "none" : "";
+    this.propsEl.classList.toggle("is-collapsed", this.propsCollapsed);
+    if (this.propsToggleBtn) {
+      this.propsToggleBtn.textContent = this.propsCollapsed ? "\u203A" : "\u2039";
+      this.propsToggleBtn.title = this.propsCollapsed ? "Show style panel" : "Hide style panel";
+    }
+    if (this.colorRowEl) {
+      this.colorRowEl.style.display = tool === "eraser" || this.propsCollapsed ? "none" : "";
+    }
+    if (this.rgbRowEl && this.propsCollapsed) {
+      this.rgbRowEl.style.display = "none";
+    }
   }
   setSvgIcon(el, key) {
     el.empty();
@@ -2073,12 +2122,13 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   clampToolbarTopLeft(left, top) {
     const rootW = this.rootEl.clientWidth || 1;
     const rootH = this.rootEl.clientHeight || 1;
-    const tbW = this.toolbarEl.offsetWidth || 200;
-    const tbH = this.toolbarEl.offsetHeight || 80;
-    const pad = 10;
+    const tbW = this.toolbarEl.offsetWidth || 280;
+    const tbH = this.toolbarEl.offsetHeight || 56;
+    const pad = 12;
+    const leftPad = this.propsCollapsed || this.gestures.navigateMode ? pad : Math.min(230, rootW * 0.4);
     const minTop = pad;
-    const maxTop = Math.max(minTop, rootH - Math.min(tbH, rootH * 0.55) - pad);
-    const minLeft = pad;
+    const maxTop = Math.max(minTop, rootH - tbH - pad);
+    const minLeft = leftPad;
     const maxLeft = Math.max(minLeft, rootW - tbW - pad);
     return {
       left: Math.min(maxLeft, Math.max(minLeft, left)),
@@ -2363,6 +2413,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     if (this.navBtn) this.navBtn.classList.toggle("is-active", this.gestures.navigateMode);
     if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
     if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
+    this.syncPropsChrome();
   }
   bindKeys() {
     this.rootEl.tabIndex = 0;
