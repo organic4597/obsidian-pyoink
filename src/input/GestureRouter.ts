@@ -79,9 +79,30 @@ export class GestureRouter {
     this.activeDrawType = null;
   }
 
+  /**
+   * Clear in-flight pointer / palm state when switching tools or navigate mode.
+   * Prevents "nav → pen but ink dead" after stale penDownIds / activeDraw.
+   */
+  resetTransient() {
+    this.activeDrawId = null;
+    this.activeDrawType = null;
+    this.pointers.clear();
+    this.penDownIds.clear();
+    this.fingerIds.clear();
+    this.multiFingerAnchor = null;
+    this.multiFingerMaxMove = 0;
+    this.downSample = null;
+    this.movedPx = 0;
+  }
+
+  /** True while a pen tip is physically down (block palm). */
+  private penTipDown(): boolean {
+    return this.penDownIds.size > 0 || this.activeDrawType === "pen";
+  }
+
+  /** Palm guard for ink — includes short post-pen window. */
   private penOwnsSurface(s: PyoInkSettings): boolean {
-    if (this.penDownIds.size > 0) return true;
-    if (this.activeDrawType === "pen") return true;
+    if (this.penTipDown()) return true;
     if (performance.now() - this.lastPenAt < (s.palmRejectMs ?? 600)) return true;
     return false;
   }
@@ -107,7 +128,9 @@ export class GestureRouter {
     }
 
     if (ev.pointerType === "touch") {
-      if (this.penOwnsSurface(s)) {
+      // Only block while pen tip is actually down — do NOT block one-finger
+      // pan during post-pen palmReject window (that made swipe feel broken).
+      if (this.penTipDown()) {
         inkLog("E_PALM");
         return { type: "ignore" };
       }
@@ -169,7 +192,8 @@ export class GestureRouter {
       this.movedPx = Math.max(this.movedPx, Math.hypot(dx, dy));
     }
 
-    if (ev.pointerType === "touch" && this.penOwnsSurface(s)) {
+    // Palm block only while tip is down; allow pan after pen lift.
+    if (ev.pointerType === "touch" && this.penTipDown()) {
       return { type: "ignore" };
     }
 

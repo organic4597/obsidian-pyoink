@@ -409,61 +409,138 @@ export class PyoInkView extends ItemView {
 
   private rebuildRgbRow() {
     this.rgbRowEl.empty();
+    this.rgbPanelEl = null;
     const tool = this.gestures.getTool();
     if (tool === "eraser" || this.gestures.navigateMode) {
       this.rgbRowEl.style.display = "none";
+      this.rgbPanelOpen = false;
       return;
     }
     this.rgbRowEl.style.display = "";
-    const { r, g, b } = this.hexToRgb(this.currentToolColor());
-    const preview = this.rgbRowEl.createDiv({ cls: "pyoink-rgb-preview" });
-    preview.style.background = this.currentToolColor();
+    this.rgbRowEl.addClass("pyoink-rgb-row");
 
-    const mk = (label: string, value: number, onChange: (n: number) => void) => {
-      const cell = this.rgbRowEl.createDiv({ cls: "pyoink-rgb-cell" });
-      cell.createSpan({ text: label, cls: "pyoink-rgb-label" });
-      const range = cell.createEl("input", { type: "range", cls: "pyoink-rgb-slider" });
-      range.min = "0";
-      range.max = "255";
-      range.step = "1";
-      range.value = String(value);
-      const num = cell.createEl("input", { type: "number", cls: "pyoink-rgb-num" });
-      num.min = "0";
-      num.max = "255";
-      num.step = "1";
-      num.value = String(value);
-      const sync = (n: number) => {
-        const v = Math.max(0, Math.min(255, Math.round(n)));
-        range.value = String(v);
-        num.value = String(v);
-        onChange(v);
-      };
-      range.oninput = () => sync(Number(range.value));
-      num.onchange = () => sync(Number(num.value));
-      return { range, num, sync };
+    // Current color circle
+    const cur = this.currentToolColor();
+    const preview = this.rgbRowEl.createEl("button", {
+      cls: "pyoink-swatch pyoink-rgb-current",
+      attr: { title: cur },
+    });
+    preview.style.background = cur;
+
+    // Toggle palette panel (circles)
+    const toggle = this.rgbRowEl.createEl("button", {
+      cls: "pyoink-tb-icon pyoink-rgb-toggle",
+      attr: { title: "Color palette" },
+    });
+    toggle.textContent = "🎨";
+    toggle.classList.toggle("is-active", this.rgbPanelOpen);
+    toggle.onclick = (ev) => {
+      ev.preventDefault();
+      this.rgbPanelOpen = !this.rgbPanelOpen;
+      this.rebuildRgbRow();
     };
 
-    let rr = r,
-      gg = g,
-      bb = b;
-    const apply = () => {
-      const hex = this.rgbToHex(rr, gg, bb);
-      preview.style.background = hex;
+    // Native color input (full RGB spectrum via OS picker)
+    const nativeWrap = this.rgbRowEl.createEl("label", {
+      cls: "pyoink-rgb-native-wrap",
+      attr: { title: "Custom RGB" },
+    });
+    const native = nativeWrap.createEl("input", {
+      type: "color",
+      cls: "pyoink-rgb-native",
+    });
+    native.value = this.normalizeHex(cur) || "#1a1a1a";
+    native.oninput = () => {
       this.finishStrokeIfNeeded();
-      this.setToolColor(hex, true);
+      this.setToolColor(native.value, true);
+      preview.style.background = native.value;
+      this.paintPaletteActive(native.value);
     };
-    mk("R", r, (n) => {
-      rr = n;
-      apply();
+
+    if (!this.rgbPanelOpen) return;
+
+    const panel = this.rgbRowEl.createDiv({ cls: "pyoink-rgb-panel" });
+    this.rgbPanelEl = panel;
+    panel.createDiv({
+      cls: "pyoink-rgb-panel-title",
+      text: "Pick a color",
     });
-    mk("G", g, (n) => {
-      gg = n;
-      apply();
+    const grid = panel.createDiv({ cls: "pyoink-rgb-grid" });
+
+    for (const hex of this.buildCirclePalette()) {
+      const b = grid.createEl("button", {
+        cls: "pyoink-swatch pyoink-rgb-circle",
+        attr: { title: hex, "data-hex": hex },
+      });
+      b.style.background = hex;
+      if (hex.toLowerCase() === cur.toLowerCase()) {
+        b.classList.add("is-active");
+        const mark = b.createSpan({ cls: "pyoink-swatch-check" });
+        mark.innerHTML = TOOLBAR_SVG.check;
+      }
+      b.onclick = () => {
+        this.finishStrokeIfNeeded();
+        this.setToolColor(hex, true);
+        preview.style.background = hex;
+        native.value = this.normalizeHex(hex) || hex;
+        this.paintPaletteActive(hex);
+      };
+    }
+  }
+
+  private paintPaletteActive(hex: string) {
+    const h = (this.normalizeHex(hex) || hex).toLowerCase();
+    const root = this.rgbPanelEl || this.rgbRowEl;
+    root.querySelectorAll("button.pyoink-rgb-circle").forEach((el) => {
+      const b = el as HTMLButtonElement;
+      const active = (b.dataset.hex || "").toLowerCase() === h;
+      b.classList.toggle("is-active", active);
+      const existing = b.querySelector(".pyoink-swatch-check");
+      if (active && !existing) {
+        const mark = b.createSpan({ cls: "pyoink-swatch-check" });
+        mark.innerHTML = TOOLBAR_SVG.check;
+      } else if (!active && existing) {
+        existing.remove();
+      }
     });
-    mk("B", b, (n) => {
-      bb = n;
-      apply();
-    });
+  }
+
+  /** Visual RGB circles: neutrals + hue×lightness rings. */
+  private buildCirclePalette(): string[] {
+    const out: string[] = [];
+    const push = (hex: string) => {
+      const n = this.normalizeHex(hex);
+      if (n && !out.includes(n)) out.push(n);
+    };
+    // Neutrals
+    for (const v of [0, 32, 64, 96, 128, 160, 192, 224, 255]) {
+      push(this.rgbToHex(v, v, v));
+    }
+    // Hue rings (12 hues × 5 lightness levels)
+    const hues = 12;
+    const lights = [0.28, 0.42, 0.55, 0.68, 0.82];
+    const sats = [0.75, 0.55];
+    for (const sat of sats) {
+      for (const light of lights) {
+        for (let i = 0; i < hues; i++) {
+          const h = (i / hues) * 360;
+          push(this.hslToHex(h, sat, light));
+        }
+      }
+    }
+    // Common pen accents
+    for (const c of PEN_COLORS) push(c);
+    return out;
+  }
+
+  private hslToHex(h: number, s: number, l: number): string {
+    const a = s * Math.min(l, 1 - l);
+    const f = (n: number) => {
+      const k = (n + h / 30) % 12;
+      const c = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+      return Math.round(255 * c);
+    };
+    return this.rgbToHex(f(0), f(8), f(4));
   }
 
   private rebuildWidthRow() {
@@ -542,6 +619,9 @@ export class PyoInkView extends ItemView {
     };
   }
 
+  private rgbPanelOpen = false;
+  private rgbPanelEl: HTMLElement | null = null;
+
   private finishStrokeIfNeeded() {
     if (!this.engine.isStroking()) return;
     const changed = this.engine.end();
@@ -553,13 +633,47 @@ export class PyoInkView extends ItemView {
     this.syncToolbar();
   }
 
-  private applyToolbarPos() {
-    const x = this.plugin.settings.toolbarXPct ?? 50;
-    const y = this.plugin.settings.toolbarYPct ?? 92;
-    this.toolbarEl.style.left = `${x}%`;
-    this.toolbarEl.style.top = `${y}%`;
-    this.toolbarEl.style.bottom = "auto";
-    this.toolbarEl.style.transform = "translate(-50%, -50%)";
+  /** Hard reset input path after tool/nav switch so ink receives pen again. */
+  private resetInkInputSurface() {
+    this.finishStrokeIfNeeded();
+    this.gestures.resetTransient();
+    this.scrollTouchId = null;
+    this.state = "ready";
+    // Drop any stuck captures on the canvas
+    try {
+      const c = this.canvas;
+      // releasePointerCapture needs id; clear via style force is enough for most stuck cases
+      c.style.pointerEvents = this.gestures.navigateMode ? "none" : "auto";
+    } catch {
+      /* */
+    }
+  }
+
+  setNavigate(on: boolean) {
+    this.resetInkInputSurface();
+    this.gestures.navigateMode = on;
+    this.pageEl.classList.toggle("is-navigate", on);
+    this.canvas.classList.toggle("is-pass-through", on);
+    // Inline style wins over CSS if a theme/cache left canvas non-interactive
+    this.canvas.style.pointerEvents = on ? "none" : "auto";
+    if (!on) this.rgbPanelOpen = false;
+    this.rebuildColorRow();
+    this.rebuildRgbRow();
+    this.rebuildWidthRow();
+    this.syncToolbar();
+    this.updateCanvasCursor();
+    this.requestRedraw();
+  }
+
+  setTool(t: InkTool) {
+    this.resetInkInputSurface();
+    this.gestures.setTool(t);
+    this.gestures.navigateMode = false;
+    this.pageEl.classList.remove("is-navigate");
+    this.canvas.classList.remove("is-pass-through");
+    this.canvas.style.pointerEvents = "auto";
+    this.syncToolbar();
+    this.updateCanvasCursor();
   }
 
   private bindToolbarDrag(handle: HTMLElement) {
@@ -603,22 +717,13 @@ export class PyoInkView extends ItemView {
     handle.addEventListener("pointercancel", onUp);
   }
 
-  setNavigate(on: boolean) {
-    this.gestures.navigateMode = on;
-    this.pageEl.classList.toggle("is-navigate", on);
-    this.canvas.classList.toggle("is-pass-through", on);
-    this.rebuildColorRow();
-    this.rebuildRgbRow();
-    this.rebuildWidthRow();
-    this.syncToolbar();
-    this.updateCanvasCursor();
-    this.requestRedraw();
-  }
-
-  setTool(t: InkTool) {
-    this.gestures.setTool(t);
-    this.syncToolbar();
-    this.updateCanvasCursor();
+  private applyToolbarPos() {
+    const x = this.plugin.settings.toolbarXPct ?? 50;
+    const y = this.plugin.settings.toolbarYPct ?? 92;
+    this.toolbarEl.style.left = `${x}%`;
+    this.toolbarEl.style.top = `${y}%`;
+    this.toolbarEl.style.bottom = "auto";
+    this.toolbarEl.style.transform = "translate(-50%, -50%)";
   }
 
   cycleTool() {
@@ -860,6 +965,17 @@ export class PyoInkView extends ItemView {
   private bindPointer() {
     const c = this.canvas;
 
+    const endScroll = (ev: PointerEvent) => {
+      if (this.scrollTouchId !== ev.pointerId) return false;
+      this.scrollTouchId = null;
+      try {
+        c.releasePointerCapture(ev.pointerId);
+      } catch {
+        /* */
+      }
+      return true;
+    };
+
     c.addEventListener("pointerdown", (ev) => {
       if (this.state !== "ready" && this.state !== "stroking") return;
       // navigate: let events fall through (canvas pass-through CSS)
@@ -867,10 +983,16 @@ export class PyoInkView extends ItemView {
 
       const rect = c.getBoundingClientRect();
       const action = this.gestures.onDown(ev, rect);
-      if (action.type === "scroll" && ev.pointerType === "touch") {
+      if (action.type === "scroll" && (ev.pointerType === "touch" || ev.pointerType === "mouse")) {
         this.scrollTouchId = ev.pointerId;
         this.lastScrollY = ev.clientY;
         this.lastScrollX = ev.clientX;
+        try {
+          c.setPointerCapture(ev.pointerId);
+        } catch {
+          /* */
+        }
+        ev.preventDefault();
         return;
       }
       this.handleGesture(action, ev, rect);
@@ -878,10 +1000,12 @@ export class PyoInkView extends ItemView {
 
     c.addEventListener("pointermove", (ev) => {
       if (this.scrollTouchId === ev.pointerId) {
+        // 1:1 pan — finger up → content up (natural)
         this.scrollEl.scrollTop += this.lastScrollY - ev.clientY;
         this.scrollEl.scrollLeft += this.lastScrollX - ev.clientX;
         this.lastScrollY = ev.clientY;
         this.lastScrollX = ev.clientX;
+        ev.preventDefault();
         return;
       }
       if (this.gestures.navigateMode && ev.pointerType !== "pen" && !this.gestures.isDrawing()) return;
@@ -891,17 +1015,18 @@ export class PyoInkView extends ItemView {
     });
 
     const up = (ev: PointerEvent) => {
-      if (this.scrollTouchId === ev.pointerId) {
-        this.scrollTouchId = null;
-        return;
-      }
+      if (endScroll(ev)) return;
       const rect = c.getBoundingClientRect();
       const action = this.gestures.onUp(ev, rect);
       this.handleGesture(action, ev, rect);
     };
     c.addEventListener("pointerup", up);
     c.addEventListener("pointercancel", (ev) => {
-      if (this.scrollTouchId === ev.pointerId) this.scrollTouchId = null;
+      if (endScroll(ev)) {
+        const action = this.gestures.onCancel(ev);
+        this.handleGesture(action, ev, c.getBoundingClientRect());
+        return;
+      }
       const action = this.gestures.onCancel(ev);
       this.handleGesture(action, ev, c.getBoundingClientRect());
     });

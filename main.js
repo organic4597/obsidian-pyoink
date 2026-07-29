@@ -556,9 +556,28 @@ var GestureRouter = class {
     this.activeDrawId = null;
     this.activeDrawType = null;
   }
+  /**
+   * Clear in-flight pointer / palm state when switching tools or navigate mode.
+   * Prevents "nav → pen but ink dead" after stale penDownIds / activeDraw.
+   */
+  resetTransient() {
+    this.activeDrawId = null;
+    this.activeDrawType = null;
+    this.pointers.clear();
+    this.penDownIds.clear();
+    this.fingerIds.clear();
+    this.multiFingerAnchor = null;
+    this.multiFingerMaxMove = 0;
+    this.downSample = null;
+    this.movedPx = 0;
+  }
+  /** True while a pen tip is physically down (block palm). */
+  penTipDown() {
+    return this.penDownIds.size > 0 || this.activeDrawType === "pen";
+  }
+  /** Palm guard for ink — includes short post-pen window. */
   penOwnsSurface(s2) {
-    if (this.penDownIds.size > 0) return true;
-    if (this.activeDrawType === "pen") return true;
+    if (this.penTipDown()) return true;
     if (performance.now() - this.lastPenAt < (s2.palmRejectMs ?? 600)) return true;
     return false;
   }
@@ -580,7 +599,7 @@ var GestureRouter = class {
       this.penDownAt = performance.now();
     }
     if (ev.pointerType === "touch") {
-      if (this.penOwnsSurface(s2)) {
+      if (this.penTipDown()) {
         inkLog("E_PALM");
         return { type: "ignore" };
       }
@@ -630,7 +649,7 @@ var GestureRouter = class {
       const dy = sample.y - this.downSample.y;
       this.movedPx = Math.max(this.movedPx, Math.hypot(dx, dy));
     }
-    if (ev.pointerType === "touch" && this.penOwnsSurface(s2)) {
+    if (ev.pointerType === "touch" && this.penTipDown()) {
       return { type: "ignore" };
     }
     if (this.fingerIds.size >= 2 && this.multiFingerAnchor) {
@@ -1280,6 +1299,8 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.scrollTouchId = null;
     this.lastScrollY = 0;
     this.lastScrollX = 0;
+    this.rgbPanelOpen = false;
+    this.rgbPanelEl = null;
     this.engine = new StrokeEngine(plugin.settings);
     this.gestures = new GestureRouter(() => this.plugin.settings);
     this.store = new InkStore(this.app, () => this.plugin.settings);
@@ -1556,57 +1577,123 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   rebuildRgbRow() {
     this.rgbRowEl.empty();
+    this.rgbPanelEl = null;
     const tool = this.gestures.getTool();
     if (tool === "eraser" || this.gestures.navigateMode) {
       this.rgbRowEl.style.display = "none";
+      this.rgbPanelOpen = false;
       return;
     }
     this.rgbRowEl.style.display = "";
-    const { r: r2, g: g2, b: b2 } = this.hexToRgb(this.currentToolColor());
-    const preview = this.rgbRowEl.createDiv({ cls: "pyoink-rgb-preview" });
-    preview.style.background = this.currentToolColor();
-    const mk = (label, value, onChange) => {
-      const cell = this.rgbRowEl.createDiv({ cls: "pyoink-rgb-cell" });
-      cell.createSpan({ text: label, cls: "pyoink-rgb-label" });
-      const range = cell.createEl("input", { type: "range", cls: "pyoink-rgb-slider" });
-      range.min = "0";
-      range.max = "255";
-      range.step = "1";
-      range.value = String(value);
-      const num = cell.createEl("input", { type: "number", cls: "pyoink-rgb-num" });
-      num.min = "0";
-      num.max = "255";
-      num.step = "1";
-      num.value = String(value);
-      const sync = (n2) => {
-        const v2 = Math.max(0, Math.min(255, Math.round(n2)));
-        range.value = String(v2);
-        num.value = String(v2);
-        onChange(v2);
-      };
-      range.oninput = () => sync(Number(range.value));
-      num.onchange = () => sync(Number(num.value));
-      return { range, num, sync };
+    this.rgbRowEl.addClass("pyoink-rgb-row");
+    const cur = this.currentToolColor();
+    const preview = this.rgbRowEl.createEl("button", {
+      cls: "pyoink-swatch pyoink-rgb-current",
+      attr: { title: cur }
+    });
+    preview.style.background = cur;
+    const toggle = this.rgbRowEl.createEl("button", {
+      cls: "pyoink-tb-icon pyoink-rgb-toggle",
+      attr: { title: "Color palette" }
+    });
+    toggle.textContent = "\u{1F3A8}";
+    toggle.classList.toggle("is-active", this.rgbPanelOpen);
+    toggle.onclick = (ev) => {
+      ev.preventDefault();
+      this.rgbPanelOpen = !this.rgbPanelOpen;
+      this.rebuildRgbRow();
     };
-    let rr = r2, gg = g2, bb = b2;
-    const apply = () => {
-      const hex = this.rgbToHex(rr, gg, bb);
-      preview.style.background = hex;
+    const nativeWrap = this.rgbRowEl.createEl("label", {
+      cls: "pyoink-rgb-native-wrap",
+      attr: { title: "Custom RGB" }
+    });
+    const native = nativeWrap.createEl("input", {
+      type: "color",
+      cls: "pyoink-rgb-native"
+    });
+    native.value = this.normalizeHex(cur) || "#1a1a1a";
+    native.oninput = () => {
       this.finishStrokeIfNeeded();
-      this.setToolColor(hex, true);
+      this.setToolColor(native.value, true);
+      preview.style.background = native.value;
+      this.paintPaletteActive(native.value);
     };
-    mk("R", r2, (n2) => {
-      rr = n2;
-      apply();
+    if (!this.rgbPanelOpen) return;
+    const panel = this.rgbRowEl.createDiv({ cls: "pyoink-rgb-panel" });
+    this.rgbPanelEl = panel;
+    panel.createDiv({
+      cls: "pyoink-rgb-panel-title",
+      text: "Pick a color"
     });
-    mk("G", g2, (n2) => {
-      gg = n2;
-      apply();
+    const grid = panel.createDiv({ cls: "pyoink-rgb-grid" });
+    for (const hex of this.buildCirclePalette()) {
+      const b2 = grid.createEl("button", {
+        cls: "pyoink-swatch pyoink-rgb-circle",
+        attr: { title: hex, "data-hex": hex }
+      });
+      b2.style.background = hex;
+      if (hex.toLowerCase() === cur.toLowerCase()) {
+        b2.classList.add("is-active");
+        const mark = b2.createSpan({ cls: "pyoink-swatch-check" });
+        mark.innerHTML = TOOLBAR_SVG.check;
+      }
+      b2.onclick = () => {
+        this.finishStrokeIfNeeded();
+        this.setToolColor(hex, true);
+        preview.style.background = hex;
+        native.value = this.normalizeHex(hex) || hex;
+        this.paintPaletteActive(hex);
+      };
+    }
+  }
+  paintPaletteActive(hex) {
+    const h2 = (this.normalizeHex(hex) || hex).toLowerCase();
+    const root = this.rgbPanelEl || this.rgbRowEl;
+    root.querySelectorAll("button.pyoink-rgb-circle").forEach((el) => {
+      const b2 = el;
+      const active = (b2.dataset.hex || "").toLowerCase() === h2;
+      b2.classList.toggle("is-active", active);
+      const existing = b2.querySelector(".pyoink-swatch-check");
+      if (active && !existing) {
+        const mark = b2.createSpan({ cls: "pyoink-swatch-check" });
+        mark.innerHTML = TOOLBAR_SVG.check;
+      } else if (!active && existing) {
+        existing.remove();
+      }
     });
-    mk("B", b2, (n2) => {
-      bb = n2;
-      apply();
-    });
+  }
+  /** Visual RGB circles: neutrals + hue×lightness rings. */
+  buildCirclePalette() {
+    const out = [];
+    const push = (hex) => {
+      const n2 = this.normalizeHex(hex);
+      if (n2 && !out.includes(n2)) out.push(n2);
+    };
+    for (const v2 of [0, 32, 64, 96, 128, 160, 192, 224, 255]) {
+      push(this.rgbToHex(v2, v2, v2));
+    }
+    const hues = 12;
+    const lights = [0.28, 0.42, 0.55, 0.68, 0.82];
+    const sats = [0.75, 0.55];
+    for (const sat of sats) {
+      for (const light of lights) {
+        for (let i2 = 0; i2 < hues; i2++) {
+          const h2 = i2 / hues * 360;
+          push(this.hslToHex(h2, sat, light));
+        }
+      }
+    }
+    for (const c2 of PEN_COLORS) push(c2);
+    return out;
+  }
+  hslToHex(h2, s2, l2) {
+    const a2 = s2 * Math.min(l2, 1 - l2);
+    const f2 = (n2) => {
+      const k2 = (n2 + h2 / 30) % 12;
+      const c2 = l2 - a2 * Math.max(Math.min(k2 - 3, 9 - k2, 1), -1);
+      return Math.round(255 * c2);
+    };
+    return this.rgbToHex(f2(0), f2(8), f2(4));
   }
   rebuildWidthRow() {
     this.widthRowEl.empty();
@@ -1680,13 +1767,41 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.requestRedraw();
     this.syncToolbar();
   }
-  applyToolbarPos() {
-    const x2 = this.plugin.settings.toolbarXPct ?? 50;
-    const y2 = this.plugin.settings.toolbarYPct ?? 92;
-    this.toolbarEl.style.left = `${x2}%`;
-    this.toolbarEl.style.top = `${y2}%`;
-    this.toolbarEl.style.bottom = "auto";
-    this.toolbarEl.style.transform = "translate(-50%, -50%)";
+  /** Hard reset input path after tool/nav switch so ink receives pen again. */
+  resetInkInputSurface() {
+    this.finishStrokeIfNeeded();
+    this.gestures.resetTransient();
+    this.scrollTouchId = null;
+    this.state = "ready";
+    try {
+      const c2 = this.canvas;
+      c2.style.pointerEvents = this.gestures.navigateMode ? "none" : "auto";
+    } catch {
+    }
+  }
+  setNavigate(on) {
+    this.resetInkInputSurface();
+    this.gestures.navigateMode = on;
+    this.pageEl.classList.toggle("is-navigate", on);
+    this.canvas.classList.toggle("is-pass-through", on);
+    this.canvas.style.pointerEvents = on ? "none" : "auto";
+    if (!on) this.rgbPanelOpen = false;
+    this.rebuildColorRow();
+    this.rebuildRgbRow();
+    this.rebuildWidthRow();
+    this.syncToolbar();
+    this.updateCanvasCursor();
+    this.requestRedraw();
+  }
+  setTool(t2) {
+    this.resetInkInputSurface();
+    this.gestures.setTool(t2);
+    this.gestures.navigateMode = false;
+    this.pageEl.classList.remove("is-navigate");
+    this.canvas.classList.remove("is-pass-through");
+    this.canvas.style.pointerEvents = "auto";
+    this.syncToolbar();
+    this.updateCanvasCursor();
   }
   bindToolbarDrag(handle) {
     let dragging = false;
@@ -1727,21 +1842,13 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     handle.addEventListener("pointerup", onUp);
     handle.addEventListener("pointercancel", onUp);
   }
-  setNavigate(on) {
-    this.gestures.navigateMode = on;
-    this.pageEl.classList.toggle("is-navigate", on);
-    this.canvas.classList.toggle("is-pass-through", on);
-    this.rebuildColorRow();
-    this.rebuildRgbRow();
-    this.rebuildWidthRow();
-    this.syncToolbar();
-    this.updateCanvasCursor();
-    this.requestRedraw();
-  }
-  setTool(t2) {
-    this.gestures.setTool(t2);
-    this.syncToolbar();
-    this.updateCanvasCursor();
+  applyToolbarPos() {
+    const x2 = this.plugin.settings.toolbarXPct ?? 50;
+    const y2 = this.plugin.settings.toolbarYPct ?? 92;
+    this.toolbarEl.style.left = `${x2}%`;
+    this.toolbarEl.style.top = `${y2}%`;
+    this.toolbarEl.style.bottom = "auto";
+    this.toolbarEl.style.transform = "translate(-50%, -50%)";
   }
   cycleTool() {
     this.finishStrokeIfNeeded();
@@ -1957,15 +2064,29 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   bindPointer() {
     const c2 = this.canvas;
+    const endScroll = (ev) => {
+      if (this.scrollTouchId !== ev.pointerId) return false;
+      this.scrollTouchId = null;
+      try {
+        c2.releasePointerCapture(ev.pointerId);
+      } catch {
+      }
+      return true;
+    };
     c2.addEventListener("pointerdown", (ev) => {
       if (this.state !== "ready" && this.state !== "stroking") return;
       if (this.gestures.navigateMode && ev.pointerType !== "pen") return;
       const rect = c2.getBoundingClientRect();
       const action = this.gestures.onDown(ev, rect);
-      if (action.type === "scroll" && ev.pointerType === "touch") {
+      if (action.type === "scroll" && (ev.pointerType === "touch" || ev.pointerType === "mouse")) {
         this.scrollTouchId = ev.pointerId;
         this.lastScrollY = ev.clientY;
         this.lastScrollX = ev.clientX;
+        try {
+          c2.setPointerCapture(ev.pointerId);
+        } catch {
+        }
+        ev.preventDefault();
         return;
       }
       this.handleGesture(action, ev, rect);
@@ -1976,6 +2097,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         this.scrollEl.scrollLeft += this.lastScrollX - ev.clientX;
         this.lastScrollY = ev.clientY;
         this.lastScrollX = ev.clientX;
+        ev.preventDefault();
         return;
       }
       if (this.gestures.navigateMode && ev.pointerType !== "pen" && !this.gestures.isDrawing()) return;
@@ -1984,17 +2106,18 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       this.handleGesture(action, ev, rect);
     });
     const up = (ev) => {
-      if (this.scrollTouchId === ev.pointerId) {
-        this.scrollTouchId = null;
-        return;
-      }
+      if (endScroll(ev)) return;
       const rect = c2.getBoundingClientRect();
       const action = this.gestures.onUp(ev, rect);
       this.handleGesture(action, ev, rect);
     };
     c2.addEventListener("pointerup", up);
     c2.addEventListener("pointercancel", (ev) => {
-      if (this.scrollTouchId === ev.pointerId) this.scrollTouchId = null;
+      if (endScroll(ev)) {
+        const action2 = this.gestures.onCancel(ev);
+        this.handleGesture(action2, ev, c2.getBoundingClientRect());
+        return;
+      }
       const action = this.gestures.onCancel(ev);
       this.handleGesture(action, ev, c2.getBoundingClientRect());
     });
