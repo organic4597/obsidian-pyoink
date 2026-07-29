@@ -333,6 +333,8 @@ export class PyoInkView extends ItemView {
     this.rebuildRgbRow();
     this.rebuildWidthRow();
     this.syncToolbar();
+    // Palette open/close changes height — keep remote inside bounds
+    this.applyToolbarPos();
   }
 
   private setSvgIcon(el: HTMLElement, key: string) {
@@ -514,6 +516,8 @@ export class PyoInkView extends ItemView {
         this.paintPaletteActive(hex);
       };
     }
+    // Height may grow when panel opens — keep handle reachable
+    requestAnimationFrame(() => this.applyToolbarPos());
   }
 
   private paintPaletteActive(hex: string) {
@@ -707,51 +711,121 @@ export class PyoInkView extends ItemView {
   private bindToolbarDrag(handle: HTMLElement) {
     let dragging = false;
     let pid: number | null = null;
+    /** Grab offset from toolbar top-left (px, root-local). */
+    let grabOffX = 0;
+    let grabOffY = 0;
+
     const onDown = (ev: PointerEvent) => {
+      // Only primary button / touch / pen tip
+      if (ev.pointerType === "mouse" && ev.button !== 0) return;
       dragging = true;
       pid = ev.pointerId;
       this.dragBound = true;
       this.toolbarEl.classList.add("is-dragging");
-      handle.setPointerCapture(ev.pointerId);
+      const root = this.rootEl.getBoundingClientRect();
+      const tb = this.toolbarEl.getBoundingClientRect();
+      grabOffX = ev.clientX - tb.left;
+      grabOffY = ev.clientY - tb.top;
+      try {
+        handle.setPointerCapture(ev.pointerId);
+      } catch {
+        /* */
+      }
+      // Stop Obsidian leaf/sidebar resize from eating the gesture
       ev.preventDefault();
       ev.stopPropagation();
+      if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
     };
+
     const onMove = (ev: PointerEvent) => {
       if (!dragging || ev.pointerId !== pid) return;
-      const rect = this.rootEl.getBoundingClientRect();
-      const x = ((ev.clientX - rect.left) / rect.width) * 100;
-      const y = ((ev.clientY - rect.top) / rect.height) * 100;
-      this.plugin.settings.toolbarXPct = Math.min(95, Math.max(5, x));
-      this.plugin.settings.toolbarYPct = Math.min(95, Math.max(5, y));
+      const root = this.rootEl.getBoundingClientRect();
+      // Desired toolbar top-left in root coords
+      let left = ev.clientX - root.left - grabOffX;
+      let top = ev.clientY - root.top - grabOffY;
+      const clamped = this.clampToolbarTopLeft(left, top);
+      // Persist as center % for settings (stable-ish across resizes)
+      const tbW = this.toolbarEl.offsetWidth || 200;
+      const tbH = this.toolbarEl.offsetHeight || 80;
+      const cx = clamped.left + tbW / 2;
+      const cy = clamped.top + tbH / 2;
+      this.plugin.settings.toolbarXPct = (cx / Math.max(1, root.width)) * 100;
+      this.plugin.settings.toolbarYPct = (cy / Math.max(1, root.height)) * 100;
       this.applyToolbarPos();
       ev.preventDefault();
+      ev.stopPropagation();
+      if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
     };
+
     const onUp = (ev: PointerEvent) => {
       if (!dragging || ev.pointerId !== pid) return;
       dragging = false;
       pid = null;
       this.dragBound = false;
       this.toolbarEl.classList.remove("is-dragging");
+      // Re-clamp after drop (palette may have changed size)
+      this.applyToolbarPos();
       void this.plugin.saveSettings();
       try {
         handle.releasePointerCapture(ev.pointerId);
       } catch {
         /* */
       }
+      ev.preventDefault();
+      ev.stopPropagation();
     };
+
+    // Handle-local down; window capture for move/up so sidebar never steals
     handle.addEventListener("pointerdown", onDown);
-    handle.addEventListener("pointermove", onMove);
-    handle.addEventListener("pointerup", onUp);
-    handle.addEventListener("pointercancel", onUp);
+    window.addEventListener("pointermove", onMove, { capture: true });
+    window.addEventListener("pointerup", onUp, { capture: true });
+    window.addEventListener("pointercancel", onUp, { capture: true });
+  }
+
+  /**
+   * Keep the whole remote inside the ink view, with the drag bar always reachable.
+   * Uses top-left pixel coords relative to rootEl.
+   */
+  private clampToolbarTopLeft(left: number, top: number): { left: number; top: number } {
+    const rootW = this.rootEl.clientWidth || 1;
+    const rootH = this.rootEl.clientHeight || 1;
+    const tbW = this.toolbarEl.offsetWidth || 200;
+    const tbH = this.toolbarEl.offsetHeight || 80;
+    const pad = 10;
+    // Drag handle is ~18px at top — keep at least that strip inside + pad
+    const minTop = pad;
+    const maxTop = Math.max(minTop, rootH - Math.min(tbH, rootH * 0.55) - pad);
+    // Never let center go into the top 8% in a way that hides the handle:
+    // maxTop already keeps handle visible; also cap how high the TOP edge can go.
+    const minLeft = pad;
+    const maxLeft = Math.max(minLeft, rootW - tbW - pad);
+    return {
+      left: Math.min(maxLeft, Math.max(minLeft, left)),
+      top: Math.min(maxTop, Math.max(minTop, top)),
+    };
   }
 
   private applyToolbarPos() {
-    const x = this.plugin.settings.toolbarXPct ?? 50;
-    const y = this.plugin.settings.toolbarYPct ?? 92;
-    this.toolbarEl.style.left = `${x}%`;
-    this.toolbarEl.style.top = `${y}%`;
+    const rootW = this.rootEl.clientWidth || 1;
+    const rootH = this.rootEl.clientHeight || 1;
+    const tbW = this.toolbarEl.offsetWidth || 200;
+    const tbH = this.toolbarEl.offsetHeight || 80;
+    // settings store center %
+    let cx = ((this.plugin.settings.toolbarXPct ?? 50) / 100) * rootW;
+    let cy = ((this.plugin.settings.toolbarYPct ?? 92) / 100) * rootH;
+    let left = cx - tbW / 2;
+    let top = cy - tbH / 2;
+    const c = this.clampToolbarTopLeft(left, top);
+    left = c.left;
+    top = c.top;
+    // write back clamped center % so reload stays valid
+    this.plugin.settings.toolbarXPct = ((left + tbW / 2) / rootW) * 100;
+    this.plugin.settings.toolbarYPct = ((top + tbH / 2) / rootH) * 100;
+    this.toolbarEl.style.left = `${left}px`;
+    this.toolbarEl.style.top = `${top}px`;
+    this.toolbarEl.style.right = "auto";
     this.toolbarEl.style.bottom = "auto";
-    this.toolbarEl.style.transform = "translate(-50%, -50%)";
+    this.toolbarEl.style.transform = "none";
   }
 
   private clampZoom(z: number): number {
