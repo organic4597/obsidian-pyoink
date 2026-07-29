@@ -571,6 +571,31 @@ var GestureRouter = class {
     this.downSample = null;
     this.movedPx = 0;
   }
+  /**
+   * Drop one pointer without side-effect shortcuts (scroll pan end, lost capture).
+   * Fixes freeze where fingerIds never cleared after scroll-only gestures.
+   */
+  releasePointer(pointerId, pointerType) {
+    this.pointers.delete(pointerId);
+    this.fingerIds.delete(pointerId);
+    if (pointerType === "pen" || this.penDownIds.has(pointerId)) {
+      this.penDownIds.delete(pointerId);
+    }
+    if (this.activeDrawId === pointerId) {
+      this.clearActiveDraw();
+    }
+    if (this.fingerIds.size === 0) {
+      this.multiFingerAnchor = null;
+      this.multiFingerMaxMove = 0;
+    }
+  }
+  /** Hover / barrel proximity: buttons===0 and no contact pressure. */
+  isPenHover(ev) {
+    if (ev.pointerType !== "pen" && ev.pointerType !== "mouse") return false;
+    if (ev.buttons !== 0) return false;
+    const p2 = typeof ev.pressure === "number" ? ev.pressure : 0;
+    return p2 <= 0;
+  }
   /** True while a pen tip is physically down (block palm). */
   penTipDown() {
     return this.penDownIds.size > 0 || this.activeDrawType === "pen";
@@ -588,13 +613,20 @@ var GestureRouter = class {
     return true;
   }
   onDown(ev, canvasRect) {
+    if (this.fingerIds.size > 0 && !this.pointers.size) {
+      this.fingerIds.clear();
+      this.multiFingerAnchor = null;
+      this.multiFingerMaxMove = 0;
+    }
     this.pointers.set(ev.pointerId, ev);
     const s2 = this.settings();
     const sample = this.sampleFromEvent(ev, canvasRect);
     this.downSample = sample;
     this.movedPx = 0;
     if (ev.pointerType === "pen") {
-      this.penDownIds.add(ev.pointerId);
+      if (ev.buttons > 0 || typeof ev.pressure === "number" && ev.pressure > 0) {
+        this.penDownIds.add(ev.pointerId);
+      }
       this.lastPenAt = performance.now();
       this.penDownAt = performance.now();
     }
@@ -642,7 +674,11 @@ var GestureRouter = class {
     const sample = this.sampleFromEvent(ev, canvasRect);
     if (ev.pointerType === "pen") {
       this.lastPenAt = performance.now();
-      this.penDownIds.add(ev.pointerId);
+      if (ev.buttons > 0 || typeof ev.pressure === "number" && ev.pressure > 0.01) {
+        this.penDownIds.add(ev.pointerId);
+      } else {
+        this.penDownIds.delete(ev.pointerId);
+      }
     }
     if (this.downSample) {
       const dx = sample.x - this.downSample.x;
@@ -686,10 +722,10 @@ var GestureRouter = class {
       const wasDrawing = this.activeDrawId === ev.pointerId;
       const holdMs = performance.now() - (this.penDownAt || performance.now());
       const sample = this.sampleFromEvent(ev, canvasRect);
-      const shortTap = this.movedPx < 16 && holdMs < 320;
-      if (shortTap && wasDrawing && performance.now() - this.lastShortcutAt > 160) {
+      const shortTap = this.movedPx < 36 && holdMs < 480;
+      if (shortTap && wasDrawing && performance.now() - this.lastShortcutAt > 120) {
         const now = performance.now();
-        if (sPen.enablePencilDoubleTap !== false && now - this.lastPenTapAt < 420 && Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 48) {
+        if (sPen.enablePencilDoubleTap !== false && now - this.lastPenTapAt < 560 && Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 72) {
           this.lastPenTapAt = 0;
           this.lastShortcutAt = now;
           this.clearActiveDraw();
@@ -2067,15 +2103,30 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     const endScroll = (ev) => {
       if (this.scrollTouchId !== ev.pointerId) return false;
       this.scrollTouchId = null;
+      this.gestures.releasePointer(ev.pointerId, ev.pointerType);
       try {
         c2.releasePointerCapture(ev.pointerId);
       } catch {
       }
       return true;
     };
+    const forceClearScroll = (reason) => {
+      if (this.scrollTouchId == null) return;
+      const id = this.scrollTouchId;
+      this.scrollTouchId = null;
+      this.gestures.releasePointer(id, "touch");
+      try {
+        c2.releasePointerCapture(id);
+      } catch {
+      }
+      inkLog("E_SCROLL_STUCK", reason);
+    };
     c2.addEventListener("pointerdown", (ev) => {
       if (this.state !== "ready" && this.state !== "stroking") return;
       if (this.gestures.navigateMode && ev.pointerType !== "pen") return;
+      if (this.scrollTouchId != null && this.scrollTouchId !== ev.pointerId) {
+        forceClearScroll("new_pointer_down");
+      }
       const rect = c2.getBoundingClientRect();
       const action = this.gestures.onDown(ev, rect);
       if (action.type === "scroll" && (ev.pointerType === "touch" || ev.pointerType === "mouse")) {
@@ -2101,6 +2152,9 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         return;
       }
       if (this.gestures.navigateMode && ev.pointerType !== "pen" && !this.gestures.isDrawing()) return;
+      if ((ev.pointerType === "pen" || ev.pointerType === "mouse") && ev.buttons === 0 && !this.gestures.isDrawing()) {
+        return;
+      }
       const rect = c2.getBoundingClientRect();
       const action = this.gestures.onMove(ev, rect);
       this.handleGesture(action, ev, rect);
@@ -2114,12 +2168,19 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     c2.addEventListener("pointerup", up);
     c2.addEventListener("pointercancel", (ev) => {
       if (endScroll(ev)) {
-        const action2 = this.gestures.onCancel(ev);
-        this.handleGesture(action2, ev, c2.getBoundingClientRect());
         return;
       }
       const action = this.gestures.onCancel(ev);
       this.handleGesture(action, ev, c2.getBoundingClientRect());
+    });
+    c2.addEventListener("lostpointercapture", (ev) => {
+      if (this.scrollTouchId === ev.pointerId) {
+        forceClearScroll("lostpointercapture");
+      }
+      if (this.gestures.getActiveDrawId() === ev.pointerId) {
+        const action = this.gestures.onCancel(ev);
+        this.handleGesture(action, ev, c2.getBoundingClientRect());
+      }
     });
     c2.addEventListener(
       "wheel",
@@ -2132,15 +2193,17 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     );
     const updateHover = (ev) => {
       if (this.dragBound) return;
-      if (ev.pointerType === "touch" && this.plugin.settings.penOnlyInk !== false) {
-        return;
-      }
+      if (this.gestures.navigateMode) return;
+      if (ev.pointerType === "touch") return;
+      if (ev.pointerType !== "pen" && ev.pointerType !== "mouse") return;
       const rect = c2.getBoundingClientRect();
       this.cursorX = ev.clientX - rect.left;
       this.cursorY = ev.clientY - rect.top;
       this.cursorOn = true;
       if (typeof ev.pressure === "number" && ev.pressure > 0) {
         this.cursorPressure = ev.pressure;
+      } else if (ev.buttons === 0) {
+        this.cursorPressure = 0.5;
       }
       if (this.state === "ready" || this.state === "stroking") this.requestRedraw();
     };
@@ -2153,15 +2216,19 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     c2.addEventListener(
       "pointerenter",
       (ev) => {
-        this.cursorOn = true;
-        updateHover(ev);
-        this.updateCanvasCursor();
+        if (ev.pointerType === "pen" || ev.pointerType === "mouse") {
+          this.cursorOn = true;
+          updateHover(ev);
+          this.updateCanvasCursor();
+        }
       },
       { capture: true }
     );
     c2.addEventListener(
       "pointerleave",
-      () => {
+      (ev) => {
+        if (ev.pointerType === "touch") return;
+        if (ev.buttons !== 0) return;
         this.cursorOn = false;
         this.requestRedraw();
       },

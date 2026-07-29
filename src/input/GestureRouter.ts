@@ -95,6 +95,34 @@ export class GestureRouter {
     this.movedPx = 0;
   }
 
+  /**
+   * Drop one pointer without side-effect shortcuts (scroll pan end, lost capture).
+   * Fixes freeze where fingerIds never cleared after scroll-only gestures.
+   */
+  releasePointer(pointerId: number, pointerType?: string) {
+    this.pointers.delete(pointerId);
+    this.fingerIds.delete(pointerId);
+    if (pointerType === "pen" || this.penDownIds.has(pointerId)) {
+      this.penDownIds.delete(pointerId);
+    }
+    if (this.activeDrawId === pointerId) {
+      this.clearActiveDraw();
+    }
+    if (this.fingerIds.size === 0) {
+      this.multiFingerAnchor = null;
+      this.multiFingerMaxMove = 0;
+    }
+  }
+
+  /** Hover / barrel proximity: buttons===0 and no contact pressure. */
+  isPenHover(ev: PointerEvent): boolean {
+    if (ev.pointerType !== "pen" && ev.pointerType !== "mouse") return false;
+    if (ev.buttons !== 0) return false;
+    // Contact usually has pressure > 0; hover is 0 (or undefined)
+    const p = typeof ev.pressure === "number" ? ev.pressure : 0;
+    return p <= 0;
+  }
+
   /** True while a pen tip is physically down (block palm). */
   private penTipDown(): boolean {
     return this.penDownIds.size > 0 || this.activeDrawType === "pen";
@@ -115,6 +143,13 @@ export class GestureRouter {
   }
 
   onDown(ev: PointerEvent, canvasRect: DOMRect): GestureAction {
+    // Stale multi-finger set from interrupted scroll freezes pan — scrub ghosts
+    if (this.fingerIds.size > 0 && !this.pointers.size) {
+      this.fingerIds.clear();
+      this.multiFingerAnchor = null;
+      this.multiFingerMaxMove = 0;
+    }
+
     this.pointers.set(ev.pointerId, ev);
     const s = this.settings();
     const sample = this.sampleFromEvent(ev, canvasRect);
@@ -122,7 +157,10 @@ export class GestureRouter {
     this.movedPx = 0;
 
     if (ev.pointerType === "pen") {
-      this.penDownIds.add(ev.pointerId);
+      // Contact only (not hover). Hover must not mark tip-down.
+      if (ev.buttons > 0 || (typeof ev.pressure === "number" && ev.pressure > 0)) {
+        this.penDownIds.add(ev.pointerId);
+      }
       this.lastPenAt = performance.now();
       this.penDownAt = performance.now();
     }
@@ -149,6 +187,7 @@ export class GestureRouter {
       }
 
       if (!this.fingerMayDraw(s)) {
+        // Scroll path: finger id tracked until releasePointer on pan end
         return { type: "scroll" };
       }
     }
@@ -183,7 +222,12 @@ export class GestureRouter {
 
     if (ev.pointerType === "pen") {
       this.lastPenAt = performance.now();
-      this.penDownIds.add(ev.pointerId);
+      // CRITICAL: do not treat hover (buttons===0) as tip-down — freezes scroll + kills hover UX
+      if (ev.buttons > 0 || (typeof ev.pressure === "number" && ev.pressure > 0.01)) {
+        this.penDownIds.add(ev.pointerId);
+      } else {
+        this.penDownIds.delete(ev.pointerId);
+      }
     }
 
     if (this.downSample) {
@@ -240,14 +284,15 @@ export class GestureRouter {
       const wasDrawing = this.activeDrawId === ev.pointerId;
       const holdMs = performance.now() - (this.penDownAt || performance.now());
       const sample = this.sampleFromEvent(ev, canvasRect);
-      const shortTap = this.movedPx < 16 && holdMs < 320;
-      if (shortTap && wasDrawing && performance.now() - this.lastShortcutAt > 160) {
+      // Looser thresholds — Pencil micro-jitter often exceeded 16px / 320ms
+      const shortTap = this.movedPx < 36 && holdMs < 480;
+      if (shortTap && wasDrawing && performance.now() - this.lastShortcutAt > 120) {
         const now = performance.now();
         // Double-tap first
         if (
           sPen.enablePencilDoubleTap !== false &&
-          now - this.lastPenTapAt < 420 &&
-          Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 48
+          now - this.lastPenTapAt < 560 &&
+          Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 72
         ) {
           this.lastPenTapAt = 0;
           this.lastShortcutAt = now;
@@ -282,6 +327,7 @@ export class GestureRouter {
             pointerId: ev.pointerId,
           };
         }
+        // ink mode: fall through to draw-end (tiny mark). Double-tap undoes it.
       }
     }
 

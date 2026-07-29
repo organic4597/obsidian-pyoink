@@ -968,6 +968,8 @@ export class PyoInkView extends ItemView {
     const endScroll = (ev: PointerEvent) => {
       if (this.scrollTouchId !== ev.pointerId) return false;
       this.scrollTouchId = null;
+      // CRITICAL: clear fingerIds left from scroll-only onDown (freeze after N pans)
+      this.gestures.releasePointer(ev.pointerId, ev.pointerType);
       try {
         c.releasePointerCapture(ev.pointerId);
       } catch {
@@ -976,10 +978,28 @@ export class PyoInkView extends ItemView {
       return true;
     };
 
+    const forceClearScroll = (reason: string) => {
+      if (this.scrollTouchId == null) return;
+      const id = this.scrollTouchId;
+      this.scrollTouchId = null;
+      this.gestures.releasePointer(id, "touch");
+      try {
+        c.releasePointerCapture(id);
+      } catch {
+        /* */
+      }
+      inkLog("E_SCROLL_STUCK", reason);
+    };
+
     c.addEventListener("pointerdown", (ev) => {
       if (this.state !== "ready" && this.state !== "stroking") return;
       // navigate: let events fall through (canvas pass-through CSS)
       if (this.gestures.navigateMode && ev.pointerType !== "pen") return;
+
+      // New contact while previous pan stuck → unlock
+      if (this.scrollTouchId != null && this.scrollTouchId !== ev.pointerId) {
+        forceClearScroll("new_pointer_down");
+      }
 
       const rect = c.getBoundingClientRect();
       const action = this.gestures.onDown(ev, rect);
@@ -1009,6 +1029,14 @@ export class PyoInkView extends ItemView {
         return;
       }
       if (this.gestures.navigateMode && ev.pointerType !== "pen" && !this.gestures.isDrawing()) return;
+      // Hover-only pen/mouse moves: do not drive draw path (still handled by updateHover)
+      if (
+        (ev.pointerType === "pen" || ev.pointerType === "mouse") &&
+        ev.buttons === 0 &&
+        !this.gestures.isDrawing()
+      ) {
+        return;
+      }
       const rect = c.getBoundingClientRect();
       const action = this.gestures.onMove(ev, rect);
       this.handleGesture(action, ev, rect);
@@ -1023,12 +1051,20 @@ export class PyoInkView extends ItemView {
     c.addEventListener("pointerup", up);
     c.addEventListener("pointercancel", (ev) => {
       if (endScroll(ev)) {
-        const action = this.gestures.onCancel(ev);
-        this.handleGesture(action, ev, c.getBoundingClientRect());
         return;
       }
       const action = this.gestures.onCancel(ev);
       this.handleGesture(action, ev, c.getBoundingClientRect());
+    });
+    c.addEventListener("lostpointercapture", (ev) => {
+      if (this.scrollTouchId === ev.pointerId) {
+        forceClearScroll("lostpointercapture");
+      }
+      // If capture lost mid-stroke, end cleanly
+      if (this.gestures.getActiveDrawId() === ev.pointerId) {
+        const action = this.gestures.onCancel(ev);
+        this.handleGesture(action, ev, c.getBoundingClientRect());
+      }
     });
 
     c.addEventListener(
@@ -1044,18 +1080,22 @@ export class PyoInkView extends ItemView {
     // Hover / tip preview (Apple Pencil hover + mouse). Keep high-freq updates.
     const updateHover = (ev: PointerEvent) => {
       if (this.dragBound) return;
+      if (this.gestures.navigateMode) return;
       // Only pen/mouse drive the ink preview ring (not multi-touch palms)
-      if (ev.pointerType === "touch" && this.plugin.settings.penOnlyInk !== false) {
-        return;
-      }
+      if (ev.pointerType === "touch") return;
+      // Accept hover (buttons===0) AND contact
+      if (ev.pointerType !== "pen" && ev.pointerType !== "mouse") return;
+
       const rect = c.getBoundingClientRect();
       this.cursorX = ev.clientX - rect.left;
       this.cursorY = ev.clientY - rect.top;
       this.cursorOn = true;
       if (typeof ev.pressure === "number" && ev.pressure > 0) {
         this.cursorPressure = ev.pressure;
+      } else if (ev.buttons === 0) {
+        // hover ring uses default pressure look
+        this.cursorPressure = 0.5;
       }
-      // Hover when buttons===0; also keep ring while drawing
       if (this.state === "ready" || this.state === "stroking") this.requestRedraw();
     };
     c.addEventListener("pointermove", updateHover, { capture: true, passive: true });
@@ -1068,15 +1108,20 @@ export class PyoInkView extends ItemView {
     c.addEventListener(
       "pointerenter",
       (ev) => {
-        this.cursorOn = true;
-        updateHover(ev);
-        this.updateCanvasCursor();
+        if (ev.pointerType === "pen" || ev.pointerType === "mouse") {
+          this.cursorOn = true;
+          updateHover(ev);
+          this.updateCanvasCursor();
+        }
       },
       { capture: true },
     );
     c.addEventListener(
       "pointerleave",
-      () => {
+      (ev) => {
+        // Only hide ring when the pen/mouse that drove it leaves
+        if (ev.pointerType === "touch") return;
+        if (ev.buttons !== 0) return; // still drawing off-canvas with capture
         this.cursorOn = false;
         this.requestRedraw();
       },
