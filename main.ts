@@ -78,6 +78,87 @@ class PyoInkSettingTab extends PluginSettingTab {
       text: "Floating toolbar: pen tools, colors, size. Below: what each tap does.",
     });
 
+    // ——— Input channels ———
+    containerEl.createEl("h3", { text: "Pen vs finger" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "Apple Pencil = pointerType pen. Finger = touch. Strict mode keeps them on separate channels.",
+    });
+
+    new Setting(containerEl)
+      .setName("Strict pen / finger separate")
+      .setDesc(
+        "ON (recommended): Pencil only draws; finger only pans/zooms/gestures. Never mix channels.",
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.strictPenTouchSeparate !== false).onChange(async (v) => {
+          this.plugin.settings.strictPenTouchSeparate = v;
+          if (v) {
+            this.plugin.settings.penOnlyInk = true;
+            this.plugin.settings.allowFingerDraw = false;
+          }
+          this.plugin.settings = sanitizeSettings(this.plugin.settings);
+          await this.plugin.saveSettings();
+          this.display();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("Pen-only ink")
+      .setDesc("Finger never draws (forced ON when strict separate is ON).")
+      .addToggle((t) =>
+        t
+          .setValue(this.plugin.settings.penOnlyInk !== false)
+          .setDisabled(this.plugin.settings.strictPenTouchSeparate !== false)
+          .onChange(async (v) => {
+            this.plugin.settings.penOnlyInk = v;
+            if (v) this.plugin.settings.allowFingerDraw = false;
+            this.plugin.settings = sanitizeSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+            this.display();
+          }),
+      );
+
+    // ——— Zoom ———
+    containerEl.createEl("h3", { text: "Zoom" });
+    new Setting(containerEl)
+      .setName("Pinch zoom")
+      .setDesc("Two-finger pinch on the note (and Ctrl/⌘ + scroll wheel on desktop).")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.enablePinchZoom !== false).onChange(async (v) => {
+          this.plugin.settings.enablePinchZoom = v;
+          await this.plugin.saveSettings();
+        }),
+      );
+    new Setting(containerEl)
+      .setName("Min zoom")
+      .setDesc("Smallest scale (0.5 = 50%).")
+      .addSlider((s) =>
+        s
+          .setLimits(0.25, 1, 0.05)
+          .setValue(this.plugin.settings.minZoom ?? 0.5)
+          .setDynamicTooltip()
+          .onChange(async (v) => {
+            this.plugin.settings.minZoom = v;
+            this.plugin.settings = sanitizeSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+    new Setting(containerEl)
+      .setName("Max zoom")
+      .setDesc("Largest scale (3 = 300%).")
+      .addSlider((s) =>
+        s
+          .setLimits(1, 5, 0.1)
+          .setValue(this.plugin.settings.maxZoom ?? 3)
+          .setDynamicTooltip()
+          .onChange(async (v) => {
+            this.plugin.settings.maxZoom = v;
+            this.plugin.settings = sanitizeSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+          }),
+      );
+
     // ——— Apple Pencil ———
     containerEl.createEl("h3", { text: "Apple Pencil (tip taps)" });
     containerEl.createEl("p", {

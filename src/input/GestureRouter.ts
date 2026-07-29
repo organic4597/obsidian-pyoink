@@ -14,6 +14,14 @@ export type GestureAction =
   | { type: "pen-double-tap"; action: FingerAction; pointerId: number }
   /** Pencil tip short single tap with non-ink action */
   | { type: "pen-single-tap"; action: FingerAction; pointerId: number }
+  /** Two-finger pinch zoom (touch only) */
+  | {
+      type: "pinch";
+      scale: number;
+      centerClientX: number;
+      centerClientY: number;
+    }
+  | { type: "pinch-end" }
   /** @deprecated use finger-action */
   | { type: "tool-cycle" };
 
@@ -55,8 +63,26 @@ export class GestureRouter {
 
   private downSample: Sample | null = null;
   private movedPx = 0;
+  /** Page zoom (CSS scale). Pointer samples are divided by this. */
+  private viewZoom = 1;
+  private pinch:
+    | {
+        idA: number;
+        idB: number;
+        startDist: number;
+        startZoom: number;
+      }
+    | null = null;
 
   constructor(private settings: () => PyoInkSettings) {}
+
+  setViewZoom(z: number) {
+    this.viewZoom = Math.max(0.01, z || 1);
+  }
+
+  getViewZoom(): number {
+    return this.viewZoom;
+  }
 
   setTool(t: InkTool) {
     this.tool = t;
@@ -93,6 +119,7 @@ export class GestureRouter {
     this.multiFingerMaxMove = 0;
     this.downSample = null;
     this.movedPx = 0;
+    this.pinch = null;
   }
 
   /**
@@ -136,10 +163,19 @@ export class GestureRouter {
   }
 
   private fingerMayDraw(s: PyoInkSettings): boolean {
+    // Strict separate channels: touch never inks
+    if (s.strictPenTouchSeparate !== false) return false;
     if (s.penOnlyInk !== false) return false;
     if (!s.allowFingerDraw) return false;
     if (this.penOwnsSurface(s)) return false;
     return true;
+  }
+
+  /** Touch may only pan/zoom/gestures when strict (or pen-only). */
+  private touchIsUiOnly(s: PyoInkSettings): boolean {
+    if (s.strictPenTouchSeparate !== false) return true;
+    if (s.penOnlyInk !== false) return true;
+    return !s.allowFingerDraw;
   }
 
   onDown(ev: PointerEvent, canvasRect: DOMRect): GestureAction {
@@ -180,23 +216,33 @@ export class GestureRouter {
           const id = this.activeDrawId;
           this.clearActiveDraw();
           this.armMulti(sample, this.fingerIds.size);
+          // end touch-draw then start pinch/tap tracking
+          const pinch = this.beginPinchIfPossible(s);
+          if (pinch) return { type: "draw-end", pointerId: id };
           return { type: "draw-end", pointerId: id };
         }
         this.armMulti(sample, this.fingerIds.size);
+        const pinch = this.beginPinchIfPossible(s);
+        if (pinch) return pinch;
         return { type: "ignore" };
       }
 
-      if (!this.fingerMayDraw(s)) {
+      if (!this.fingerMayDraw(s) || this.touchIsUiOnly(s)) {
         // Scroll path: finger id tracked until releasePointer on pan end
         return { type: "scroll" };
       }
+    }
+
+    // Pen never scrolls/pans in strict mode (ink only)
+    if (ev.pointerType === "pen" && s.strictPenTouchSeparate !== false) {
+      // fall through to draw
     }
 
     if (this.navigateMode && ev.pointerType !== "pen") {
       return { type: "ignore" };
     }
 
-    if (s.penOnlyInk !== false && ev.pointerType === "touch") {
+    if (this.touchIsUiOnly(s) && ev.pointerType === "touch") {
       return { type: "scroll" };
     }
 
@@ -241,16 +287,22 @@ export class GestureRouter {
       return { type: "ignore" };
     }
 
-    if (this.fingerIds.size >= 2 && this.multiFingerAnchor) {
-      // update peak finger count while held
-      this.multiFingerAnchor.count = Math.max(this.multiFingerAnchor.count, this.fingerIds.size);
-      const dx = sample.x - this.multiFingerAnchor.x;
-      const dy = sample.y - this.multiFingerAnchor.y;
-      this.multiFingerMaxMove = Math.max(this.multiFingerMaxMove, Math.hypot(dx, dy));
+    if (this.fingerIds.size >= 2) {
+      // update peak finger count while held (for tap shortcuts)
+      if (this.multiFingerAnchor) {
+        this.multiFingerAnchor.count = Math.max(this.multiFingerAnchor.count, this.fingerIds.size);
+        const dx = sample.x - this.multiFingerAnchor.x;
+        const dy = sample.y - this.multiFingerAnchor.y;
+        this.multiFingerMaxMove = Math.max(this.multiFingerMaxMove, Math.hypot(dx, dy));
+      }
+      if (s.enablePinchZoom !== false) {
+        const pinch = this.pinchMove(s);
+        if (pinch) return pinch;
+      }
       return { type: "ignore" };
     }
 
-    if (ev.pointerType === "touch" && s.penOnlyInk !== false) {
+    if (ev.pointerType === "touch" && this.touchIsUiOnly(s)) {
       return { type: "ignore" };
     }
 
@@ -334,6 +386,18 @@ export class GestureRouter {
     if (ev.pointerType === "touch") {
       this.fingerIds.delete(ev.pointerId);
 
+      // end pinch when fewer than 2 fingers
+      if (this.pinch && this.fingerIds.size < 2) {
+        this.pinch = null;
+        if (this.fingerIds.size === 0 && this.multiFingerAnchor) {
+          // fall through to tap detection below
+        } else if (this.fingerIds.size === 1) {
+          return { type: "pinch-end" };
+        } else {
+          return { type: "pinch-end" };
+        }
+      }
+
       // multi-finger shortcut when all fingers up
       if (this.fingerIds.size === 0 && this.multiFingerAnchor) {
         const dt = performance.now() - this.multiFingerAnchor.t;
@@ -341,7 +405,9 @@ export class GestureRouter {
         const count = this.multiFingerAnchor.count;
         this.multiFingerAnchor = null;
         this.multiFingerMaxMove = 0;
+        this.pinch = null;
 
+        // If fingers moved a lot, it was pinch/pan — not a tap
         if (
           !this.penOwnsSurface(s) &&
           dt < 380 &&
@@ -357,6 +423,7 @@ export class GestureRouter {
             return { type: "finger-action", action };
           }
         }
+        return { type: "pinch-end" };
       }
 
       // single-finger double-tap (scroll finger, not drawing)
@@ -439,9 +506,11 @@ export class GestureRouter {
   }
 
   sampleFromEvent(ev: PointerEvent, rect: DOMRect): Sample {
+    const z = this.viewZoom || 1;
     return {
-      x: ev.clientX - rect.left,
-      y: ev.clientY - rect.top,
+      // Divide by zoom: getBoundingClientRect is visual (scaled); ink is content space
+      x: (ev.clientX - rect.left) / z,
+      y: (ev.clientY - rect.top) / z,
       pressure: ev.pressure,
       t: ev.timeStamp || performance.now(),
       pointerType: ev.pointerType || "mouse",
@@ -452,5 +521,62 @@ export class GestureRouter {
     const list =
       typeof ev.getCoalescedEvents === "function" ? ev.getCoalescedEvents() : [ev];
     return list.map((e) => this.sampleFromEvent(e, rect));
+  }
+
+  private touchPair(): { a: PointerEvent; b: PointerEvent } | null {
+    if (this.fingerIds.size < 2) return null;
+    const ids = [...this.fingerIds];
+    const a = this.pointers.get(ids[0]);
+    const b = this.pointers.get(ids[1]);
+    if (!a || !b) return null;
+    return { a, b };
+  }
+
+  private beginPinchIfPossible(s: PyoInkSettings): GestureAction | null {
+    if (s.enablePinchZoom === false) return null;
+    const pair = this.touchPair();
+    if (!pair) return null;
+    const dist = Math.hypot(pair.a.clientX - pair.b.clientX, pair.a.clientY - pair.b.clientY);
+    if (dist < 8) return null;
+    const ids = [...this.fingerIds];
+    this.pinch = {
+      idA: ids[0],
+      idB: ids[1],
+      startDist: dist,
+      startZoom: this.viewZoom,
+    };
+    return {
+      type: "pinch",
+      scale: this.viewZoom,
+      centerClientX: (pair.a.clientX + pair.b.clientX) / 2,
+      centerClientY: (pair.a.clientY + pair.b.clientY) / 2,
+    };
+  }
+
+  private pinchMove(s: PyoInkSettings): GestureAction | null {
+    if (s.enablePinchZoom === false) return null;
+    const pair = this.touchPair();
+    if (!pair) return null;
+    const dist = Math.hypot(pair.a.clientX - pair.b.clientX, pair.a.clientY - pair.b.clientY);
+    if (dist < 8) return null;
+    if (!this.pinch) {
+      const ids = [...this.fingerIds];
+      this.pinch = {
+        idA: ids[0],
+        idB: ids[1],
+        startDist: dist,
+        startZoom: this.viewZoom,
+      };
+    }
+    const factor = dist / Math.max(1, this.pinch.startDist);
+    const next = this.pinch.startZoom * factor;
+    // Mark multi-finger as "moved" so short-tap shortcuts don't fire after pinch
+    this.multiFingerMaxMove = Math.max(this.multiFingerMaxMove, Math.abs(dist - this.pinch.startDist));
+    return {
+      type: "pinch",
+      scale: next,
+      centerClientX: (pair.a.clientX + pair.b.clientX) / 2,
+      centerClientY: (pair.a.clientY + pair.b.clientY) / 2,
+    };
   }
 }

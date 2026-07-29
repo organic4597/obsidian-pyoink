@@ -539,6 +539,15 @@ var GestureRouter = class {
     this.penDownAt = 0;
     this.downSample = null;
     this.movedPx = 0;
+    /** Page zoom (CSS scale). Pointer samples are divided by this. */
+    this.viewZoom = 1;
+    this.pinch = null;
+  }
+  setViewZoom(z) {
+    this.viewZoom = Math.max(0.01, z || 1);
+  }
+  getViewZoom() {
+    return this.viewZoom;
   }
   setTool(t2) {
     this.tool = t2;
@@ -570,6 +579,7 @@ var GestureRouter = class {
     this.multiFingerMaxMove = 0;
     this.downSample = null;
     this.movedPx = 0;
+    this.pinch = null;
   }
   /**
    * Drop one pointer without side-effect shortcuts (scroll pan end, lost capture).
@@ -607,10 +617,17 @@ var GestureRouter = class {
     return false;
   }
   fingerMayDraw(s2) {
+    if (s2.strictPenTouchSeparate !== false) return false;
     if (s2.penOnlyInk !== false) return false;
     if (!s2.allowFingerDraw) return false;
     if (this.penOwnsSurface(s2)) return false;
     return true;
+  }
+  /** Touch may only pan/zoom/gestures when strict (or pen-only). */
+  touchIsUiOnly(s2) {
+    if (s2.strictPenTouchSeparate !== false) return true;
+    if (s2.penOnlyInk !== false) return true;
+    return !s2.allowFingerDraw;
   }
   onDown(ev, canvasRect) {
     if (this.fingerIds.size > 0 && !this.pointers.size) {
@@ -641,19 +658,25 @@ var GestureRouter = class {
           const id = this.activeDrawId;
           this.clearActiveDraw();
           this.armMulti(sample, this.fingerIds.size);
+          const pinch2 = this.beginPinchIfPossible(s2);
+          if (pinch2) return { type: "draw-end", pointerId: id };
           return { type: "draw-end", pointerId: id };
         }
         this.armMulti(sample, this.fingerIds.size);
+        const pinch = this.beginPinchIfPossible(s2);
+        if (pinch) return pinch;
         return { type: "ignore" };
       }
-      if (!this.fingerMayDraw(s2)) {
+      if (!this.fingerMayDraw(s2) || this.touchIsUiOnly(s2)) {
         return { type: "scroll" };
       }
+    }
+    if (ev.pointerType === "pen" && s2.strictPenTouchSeparate !== false) {
     }
     if (this.navigateMode && ev.pointerType !== "pen") {
       return { type: "ignore" };
     }
-    if (s2.penOnlyInk !== false && ev.pointerType === "touch") {
+    if (this.touchIsUiOnly(s2) && ev.pointerType === "touch") {
       return { type: "scroll" };
     }
     if (this.activeDrawId !== null && ev.pointerId !== this.activeDrawId) {
@@ -688,14 +711,20 @@ var GestureRouter = class {
     if (ev.pointerType === "touch" && this.penTipDown()) {
       return { type: "ignore" };
     }
-    if (this.fingerIds.size >= 2 && this.multiFingerAnchor) {
-      this.multiFingerAnchor.count = Math.max(this.multiFingerAnchor.count, this.fingerIds.size);
-      const dx = sample.x - this.multiFingerAnchor.x;
-      const dy = sample.y - this.multiFingerAnchor.y;
-      this.multiFingerMaxMove = Math.max(this.multiFingerMaxMove, Math.hypot(dx, dy));
+    if (this.fingerIds.size >= 2) {
+      if (this.multiFingerAnchor) {
+        this.multiFingerAnchor.count = Math.max(this.multiFingerAnchor.count, this.fingerIds.size);
+        const dx = sample.x - this.multiFingerAnchor.x;
+        const dy = sample.y - this.multiFingerAnchor.y;
+        this.multiFingerMaxMove = Math.max(this.multiFingerMaxMove, Math.hypot(dx, dy));
+      }
+      if (s2.enablePinchZoom !== false) {
+        const pinch = this.pinchMove(s2);
+        if (pinch) return pinch;
+      }
       return { type: "ignore" };
     }
-    if (ev.pointerType === "touch" && s2.penOnlyInk !== false) {
+    if (ev.pointerType === "touch" && this.touchIsUiOnly(s2)) {
       return { type: "ignore" };
     }
     if (this.activeDrawId === null || ev.pointerId !== this.activeDrawId) {
@@ -756,12 +785,22 @@ var GestureRouter = class {
     }
     if (ev.pointerType === "touch") {
       this.fingerIds.delete(ev.pointerId);
+      if (this.pinch && this.fingerIds.size < 2) {
+        this.pinch = null;
+        if (this.fingerIds.size === 0 && this.multiFingerAnchor) {
+        } else if (this.fingerIds.size === 1) {
+          return { type: "pinch-end" };
+        } else {
+          return { type: "pinch-end" };
+        }
+      }
       if (this.fingerIds.size === 0 && this.multiFingerAnchor) {
         const dt = performance.now() - this.multiFingerAnchor.t;
         const move = this.multiFingerMaxMove;
         const count = this.multiFingerAnchor.count;
         this.multiFingerAnchor = null;
         this.multiFingerMaxMove = 0;
+        this.pinch = null;
         if (!this.penOwnsSurface(s2) && dt < 380 && move < 22 && performance.now() - this.lastShortcutAt > 220) {
           const action = count >= 3 ? s2.threeFingerTapAction : s2.twoFingerTapAction || (s2.enableTwoFingerToolCycle ? "cycle_tool" : "none");
           if (action && action !== "none") {
@@ -769,6 +808,7 @@ var GestureRouter = class {
             return { type: "finger-action", action };
           }
         }
+        return { type: "pinch-end" };
       }
       if (this.fingerIds.size === 0 && !this.multiFingerAnchor && this.activeDrawId === null && !this.penOwnsSurface(s2) && this.movedPx < 14) {
         const now = performance.now();
@@ -823,9 +863,11 @@ var GestureRouter = class {
     this.multiFingerMaxMove = 0;
   }
   sampleFromEvent(ev, rect) {
+    const z = this.viewZoom || 1;
     return {
-      x: ev.clientX - rect.left,
-      y: ev.clientY - rect.top,
+      // Divide by zoom: getBoundingClientRect is visual (scaled); ink is content space
+      x: (ev.clientX - rect.left) / z,
+      y: (ev.clientY - rect.top) / z,
       pressure: ev.pressure,
       t: ev.timeStamp || performance.now(),
       pointerType: ev.pointerType || "mouse"
@@ -834,6 +876,59 @@ var GestureRouter = class {
   collectSamples(ev, rect) {
     const list = typeof ev.getCoalescedEvents === "function" ? ev.getCoalescedEvents() : [ev];
     return list.map((e2) => this.sampleFromEvent(e2, rect));
+  }
+  touchPair() {
+    if (this.fingerIds.size < 2) return null;
+    const ids = [...this.fingerIds];
+    const a2 = this.pointers.get(ids[0]);
+    const b2 = this.pointers.get(ids[1]);
+    if (!a2 || !b2) return null;
+    return { a: a2, b: b2 };
+  }
+  beginPinchIfPossible(s2) {
+    if (s2.enablePinchZoom === false) return null;
+    const pair = this.touchPair();
+    if (!pair) return null;
+    const dist = Math.hypot(pair.a.clientX - pair.b.clientX, pair.a.clientY - pair.b.clientY);
+    if (dist < 8) return null;
+    const ids = [...this.fingerIds];
+    this.pinch = {
+      idA: ids[0],
+      idB: ids[1],
+      startDist: dist,
+      startZoom: this.viewZoom
+    };
+    return {
+      type: "pinch",
+      scale: this.viewZoom,
+      centerClientX: (pair.a.clientX + pair.b.clientX) / 2,
+      centerClientY: (pair.a.clientY + pair.b.clientY) / 2
+    };
+  }
+  pinchMove(s2) {
+    if (s2.enablePinchZoom === false) return null;
+    const pair = this.touchPair();
+    if (!pair) return null;
+    const dist = Math.hypot(pair.a.clientX - pair.b.clientX, pair.a.clientY - pair.b.clientY);
+    if (dist < 8) return null;
+    if (!this.pinch) {
+      const ids = [...this.fingerIds];
+      this.pinch = {
+        idA: ids[0],
+        idB: ids[1],
+        startDist: dist,
+        startZoom: this.viewZoom
+      };
+    }
+    const factor = dist / Math.max(1, this.pinch.startDist);
+    const next = this.pinch.startZoom * factor;
+    this.multiFingerMaxMove = Math.max(this.multiFingerMaxMove, Math.abs(dist - this.pinch.startDist));
+    return {
+      type: "pinch",
+      scale: next,
+      centerClientX: (pair.a.clientX + pair.b.clientX) / 2,
+      centerClientY: (pair.a.clientY + pair.b.clientY) / 2
+    };
   }
 };
 
@@ -1225,6 +1320,10 @@ var DEFAULT_SETTINGS = {
   pencilSingleTapAction: "ink",
   penOnlyInk: true,
   allowFingerDraw: false,
+  strictPenTouchSeparate: true,
+  enablePinchZoom: true,
+  minZoom: 0.5,
+  maxZoom: 3,
   palmRejectMs: 700,
   simulatePressureFallback: true,
   pressureGain: 1.2,
@@ -1264,6 +1363,19 @@ function sanitizeSettings(raw) {
   s2.toolbarXPct = clamp(Number(s2.toolbarXPct), 5, 95);
   s2.toolbarYPct = clamp(Number(s2.toolbarYPct), 5, 95);
   if (s2.penOnlyInk === void 0) s2.penOnlyInk = true;
+  if (s2.strictPenTouchSeparate === void 0) s2.strictPenTouchSeparate = true;
+  if (s2.enablePinchZoom === void 0) s2.enablePinchZoom = true;
+  s2.minZoom = clamp(Number(s2.minZoom ?? 0.5), 0.25, 1);
+  s2.maxZoom = clamp(Number(s2.maxZoom ?? 3), 1, 5);
+  if (s2.minZoom > s2.maxZoom) {
+    const t2 = s2.minZoom;
+    s2.minZoom = s2.maxZoom;
+    s2.maxZoom = t2;
+  }
+  if (s2.strictPenTouchSeparate) {
+    s2.penOnlyInk = true;
+    s2.allowFingerDraw = false;
+  }
   if (s2.penOnlyInk) s2.allowFingerDraw = false;
   if (!Array.isArray(s2.toolCycle) || s2.toolCycle.length === 0) {
     s2.toolCycle = [...DEFAULT_SETTINGS.toolCycle];
@@ -1325,6 +1437,8 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.cursorPressure = 0.5;
     this.undoBtn = null;
     this.redoBtn = null;
+    /** Content zoom (1 = 100%). Touch pinch / ctrl-wheel. */
+    this.viewZoom = 1;
     this.saveTimer = null;
     this.raf = 0;
     this.needRedraw = false;
@@ -1355,13 +1469,15 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     container.empty();
     this.rootEl = container.createDiv({ cls: "pyoink-root" });
     this.scrollEl = this.rootEl.createDiv({ cls: "pyoink-scroll" });
-    this.pageEl = this.scrollEl.createDiv({ cls: "pyoink-page" });
+    this.zoomPadEl = this.scrollEl.createDiv({ cls: "pyoink-zoom-pad" });
+    this.pageEl = this.zoomPadEl.createDiv({ cls: "pyoink-page" });
     this.noteEl = this.pageEl.createDiv({ cls: "pyoink-content" });
     this.canvas = this.pageEl.createEl("canvas", { cls: "pyoink-canvas" });
     const ctx = this.canvas.getContext("2d", { alpha: true });
     if (!ctx) throw new Error("2d unavailable");
     this.ctx = ctx;
     this.cacheCanvas = document.createElement("canvas");
+    this.viewZoom = 1;
     this.buildToolbar();
     this.bindPointer();
     this.bindKeys();
@@ -1386,6 +1502,9 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.engine = new StrokeEngine(this.plugin.settings);
     this.gestures = new GestureRouter(() => this.plugin.settings);
     this.gestures.navigateMode = false;
+    this.viewZoom = 1;
+    this.gestures.setViewZoom(1);
+    this.applyPageZoom();
     this.syncToolbar();
     this.noteEl.empty();
     try {
@@ -1514,6 +1633,15 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       }
       if (this.file) await this.leaf.openFile(this.file);
     };
+    const zOut = tools.createEl("button", { cls: "pyoink-tb-icon", text: "\u2212" });
+    zOut.title = "Zoom out";
+    zOut.onclick = () => this.bumpZoom(1 / 1.15);
+    const zReset = tools.createEl("button", { cls: "pyoink-tb-icon", text: "1:1" });
+    zReset.title = "Reset zoom";
+    zReset.onclick = () => this.setZoom(1);
+    const zIn = tools.createEl("button", { cls: "pyoink-tb-icon", text: "+" });
+    zIn.title = "Zoom in";
+    zIn.onclick = () => this.bumpZoom(1.15);
     this.colorRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-color-row" });
     this.rgbRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-rgb-row" });
     this.widthRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-width-row" });
@@ -1886,6 +2014,52 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.toolbarEl.style.bottom = "auto";
     this.toolbarEl.style.transform = "translate(-50%, -50%)";
   }
+  clampZoom(z) {
+    const s2 = this.plugin.settings;
+    const min = s2.minZoom ?? 0.5;
+    const max = s2.maxZoom ?? 3;
+    return Math.min(max, Math.max(min, z));
+  }
+  /** Apply CSS zoom; keep focal client point stable when provided. */
+  setZoom(next, focalClientX, focalClientY) {
+    const z1 = this.viewZoom || 1;
+    const z2 = this.clampZoom(next);
+    if (Math.abs(z2 - z1) < 1e-3) {
+      this.viewZoom = z2;
+      this.gestures.setViewZoom(z2);
+      this.applyPageZoom();
+      return;
+    }
+    const scroll = this.scrollEl;
+    const srect = scroll.getBoundingClientRect();
+    const fx = focalClientX ?? srect.left + srect.width / 2;
+    const fy = focalClientY ?? srect.top + srect.height / 2;
+    const contentX = (scroll.scrollLeft + (fx - srect.left)) / z1;
+    const contentY = (scroll.scrollTop + (fy - srect.top)) / z1;
+    this.viewZoom = z2;
+    this.gestures.setViewZoom(z2);
+    this.applyPageZoom();
+    scroll.scrollLeft = contentX * z2 - (fx - srect.left);
+    scroll.scrollTop = contentY * z2 - (fy - srect.top);
+    this.requestRedraw();
+  }
+  bumpZoom(factor) {
+    this.setZoom(this.viewZoom * factor);
+  }
+  applyPageZoom() {
+    const z = this.viewZoom || 1;
+    const w2 = this.cssW || this.pageEl.clientWidth || 1;
+    const h2 = this.cssH || this.pageEl.clientHeight || 1;
+    if (this.zoomPadEl) {
+      this.zoomPadEl.style.width = `${Math.max(1, w2 * z)}px`;
+      this.zoomPadEl.style.height = `${Math.max(1, h2 * z)}px`;
+    }
+    this.pageEl.style.width = `${w2}px`;
+    this.pageEl.style.minHeight = `${h2}px`;
+    this.pageEl.style.transform = z === 1 ? "" : `scale(${z})`;
+    this.pageEl.style.transformOrigin = "0 0";
+    this.gestures.setViewZoom(z);
+  }
   cycleTool() {
     this.finishStrokeIfNeeded();
     this.setNavigate(false);
@@ -2185,6 +2359,13 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     c2.addEventListener(
       "wheel",
       (ev) => {
+        if (ev.ctrlKey || ev.metaKey) {
+          if (this.plugin.settings.enablePinchZoom === false) return;
+          const factor = ev.deltaY < 0 ? 1.08 : 1 / 1.08;
+          this.setZoom(this.viewZoom * factor, ev.clientX, ev.clientY);
+          ev.preventDefault();
+          return;
+        }
         this.scrollEl.scrollTop += ev.deltaY;
         this.scrollEl.scrollLeft += ev.deltaX;
         ev.preventDefault();
@@ -2197,8 +2378,9 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       if (ev.pointerType === "touch") return;
       if (ev.pointerType !== "pen" && ev.pointerType !== "mouse") return;
       const rect = c2.getBoundingClientRect();
-      this.cursorX = ev.clientX - rect.left;
-      this.cursorY = ev.clientY - rect.top;
+      const z = this.viewZoom || 1;
+      this.cursorX = (ev.clientX - rect.left) / z;
+      this.cursorY = (ev.clientY - rect.top) / z;
       this.cursorOn = true;
       if (typeof ev.pressure === "number" && ev.pressure > 0) {
         this.cursorPressure = ev.pressure;
@@ -2247,6 +2429,22 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     switch (action.type) {
       case "scroll":
       case "ignore":
+        return;
+      case "pinch": {
+        if (this.scrollTouchId != null) {
+          const id = this.scrollTouchId;
+          this.scrollTouchId = null;
+          this.gestures.releasePointer(id, "touch");
+          try {
+            this.canvas.releasePointerCapture(id);
+          } catch {
+          }
+        }
+        this.setZoom(action.scale, action.centerClientX, action.centerClientY);
+        ev.preventDefault();
+        return;
+      }
+      case "pinch-end":
         return;
       case "navigate-click": {
         const opened = this.clickThrough(action.clientX, action.clientY);
@@ -2525,6 +2723,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.cssH = h2;
     this.pageEl.style.width = `${w2}px`;
     this.pageEl.style.minHeight = `${h2}px`;
+    this.applyPageZoom();
     this.canvas.width = Math.max(1, Math.floor(w2 * dpr));
     this.canvas.height = Math.max(1, Math.floor(h2 * dpr));
     this.canvas.style.width = `${w2}px`;
@@ -2616,6 +2815,55 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
     containerEl.createEl("p", {
       text: "Floating toolbar: pen tools, colors, size. Below: what each tap does."
     });
+    containerEl.createEl("h3", { text: "Pen vs finger" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "Apple Pencil = pointerType pen. Finger = touch. Strict mode keeps them on separate channels."
+    });
+    new import_obsidian3.Setting(containerEl).setName("Strict pen / finger separate").setDesc(
+      "ON (recommended): Pencil only draws; finger only pans/zooms/gestures. Never mix channels."
+    ).addToggle(
+      (t2) => t2.setValue(this.plugin.settings.strictPenTouchSeparate !== false).onChange(async (v2) => {
+        this.plugin.settings.strictPenTouchSeparate = v2;
+        if (v2) {
+          this.plugin.settings.penOnlyInk = true;
+          this.plugin.settings.allowFingerDraw = false;
+        }
+        this.plugin.settings = sanitizeSettings(this.plugin.settings);
+        await this.plugin.saveSettings();
+        this.display();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Pen-only ink").setDesc("Finger never draws (forced ON when strict separate is ON).").addToggle(
+      (t2) => t2.setValue(this.plugin.settings.penOnlyInk !== false).setDisabled(this.plugin.settings.strictPenTouchSeparate !== false).onChange(async (v2) => {
+        this.plugin.settings.penOnlyInk = v2;
+        if (v2) this.plugin.settings.allowFingerDraw = false;
+        this.plugin.settings = sanitizeSettings(this.plugin.settings);
+        await this.plugin.saveSettings();
+        this.display();
+      })
+    );
+    containerEl.createEl("h3", { text: "Zoom" });
+    new import_obsidian3.Setting(containerEl).setName("Pinch zoom").setDesc("Two-finger pinch on the note (and Ctrl/\u2318 + scroll wheel on desktop).").addToggle(
+      (t2) => t2.setValue(this.plugin.settings.enablePinchZoom !== false).onChange(async (v2) => {
+        this.plugin.settings.enablePinchZoom = v2;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Min zoom").setDesc("Smallest scale (0.5 = 50%).").addSlider(
+      (s2) => s2.setLimits(0.25, 1, 0.05).setValue(this.plugin.settings.minZoom ?? 0.5).setDynamicTooltip().onChange(async (v2) => {
+        this.plugin.settings.minZoom = v2;
+        this.plugin.settings = sanitizeSettings(this.plugin.settings);
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Max zoom").setDesc("Largest scale (3 = 300%).").addSlider(
+      (s2) => s2.setLimits(1, 5, 0.1).setValue(this.plugin.settings.maxZoom ?? 3).setDynamicTooltip().onChange(async (v2) => {
+        this.plugin.settings.maxZoom = v2;
+        this.plugin.settings = sanitizeSettings(this.plugin.settings);
+        await this.plugin.saveSettings();
+      })
+    );
     containerEl.createEl("h3", { text: "Apple Pencil (tip taps)" });
     containerEl.createEl("p", {
       cls: "setting-item-description",

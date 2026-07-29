@@ -13,15 +13,24 @@
   position: absolute;
   inset: 0;
   overflow: auto;
-  touch-action: pan-y pan-x;
+  touch-action: none; /* pan/zoom handled by PyoInk (not browser native) */
   z-index: 1;
   -webkit-overflow-scrolling: touch;
 }
 
+.pyoink-zoom-pad {
+  position: relative;
+  /* size set in JS: contentW * zoom × contentH * zoom */
+  min-width: 100%;
+  min-height: 100%;
+}
+
 .pyoink-page {
   position: relative;
-  margin: 0 auto;
-  max-width: 100%;
+  margin: 0;
+  max-width: none;
+  transform-origin: 0 0;
+  will-change: transform;
 }
 
 /* Note body — use Obsidian Reading View classes on the same node (see TS).

@@ -58,6 +58,7 @@ export class PyoInkView extends ItemView {
 
   private rootEl!: HTMLElement;
   private scrollEl!: HTMLElement;
+  private zoomPadEl!: HTMLElement;
   private pageEl!: HTMLElement;
   private noteEl!: HTMLElement;
   private canvas!: HTMLCanvasElement;
@@ -77,6 +78,8 @@ export class PyoInkView extends ItemView {
   private undoBtn: HTMLButtonElement | null = null;
   private redoBtn: HTMLButtonElement | null = null;
   private widthRowEl!: HTMLElement;
+  /** Content zoom (1 = 100%). Touch pinch / ctrl-wheel. */
+  private viewZoom = 1;
 
   private saveTimer: number | null = null;
   private raf = 0;
@@ -116,14 +119,17 @@ export class PyoInkView extends ItemView {
     container.empty();
     this.rootEl = container.createDiv({ cls: "pyoink-root" });
     this.scrollEl = this.rootEl.createDiv({ cls: "pyoink-scroll" });
+    // zoomPad absorbs layout size = content * zoom so scroll range matches visual scale
+    this.zoomPadEl = this.scrollEl.createDiv({ cls: "pyoink-zoom-pad" });
     // page = content + transparent canvas stacked
-    this.pageEl = this.scrollEl.createDiv({ cls: "pyoink-page" });
+    this.pageEl = this.zoomPadEl.createDiv({ cls: "pyoink-page" });
     this.noteEl = this.pageEl.createDiv({ cls: "pyoink-content" });
     this.canvas = this.pageEl.createEl("canvas", { cls: "pyoink-canvas" });
     const ctx = this.canvas.getContext("2d", { alpha: true });
     if (!ctx) throw new Error("2d unavailable");
     this.ctx = ctx;
     this.cacheCanvas = document.createElement("canvas");
+    this.viewZoom = 1;
     this.buildToolbar();
     this.bindPointer();
     this.bindKeys();
@@ -150,6 +156,9 @@ export class PyoInkView extends ItemView {
     this.engine = new StrokeEngine(this.plugin.settings);
     this.gestures = new GestureRouter(() => this.plugin.settings);
     this.gestures.navigateMode = false;
+    this.viewZoom = 1;
+    this.gestures.setViewZoom(1);
+    this.applyPageZoom();
     this.syncToolbar();
     this.noteEl.empty();
 
@@ -297,6 +306,17 @@ export class PyoInkView extends ItemView {
       }
       if (this.file) await this.leaf.openFile(this.file);
     };
+
+    // Zoom controls (also pinch with two fingers)
+    const zOut = tools.createEl("button", { cls: "pyoink-tb-icon", text: "−" });
+    zOut.title = "Zoom out";
+    zOut.onclick = () => this.bumpZoom(1 / 1.15);
+    const zReset = tools.createEl("button", { cls: "pyoink-tb-icon", text: "1:1" });
+    zReset.title = "Reset zoom";
+    zReset.onclick = () => this.setZoom(1);
+    const zIn = tools.createEl("button", { cls: "pyoink-tb-icon", text: "+" });
+    zIn.title = "Zoom in";
+    zIn.onclick = () => this.bumpZoom(1.15);
 
     this.colorRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-color-row" });
     this.rgbRowEl = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-rgb-row" });
@@ -726,6 +746,60 @@ export class PyoInkView extends ItemView {
     this.toolbarEl.style.transform = "translate(-50%, -50%)";
   }
 
+  private clampZoom(z: number): number {
+    const s = this.plugin.settings;
+    const min = s.minZoom ?? 0.5;
+    const max = s.maxZoom ?? 3;
+    return Math.min(max, Math.max(min, z));
+  }
+
+  /** Apply CSS zoom; keep focal client point stable when provided. */
+  setZoom(next: number, focalClientX?: number, focalClientY?: number) {
+    const z1 = this.viewZoom || 1;
+    const z2 = this.clampZoom(next);
+    if (Math.abs(z2 - z1) < 0.001) {
+      this.viewZoom = z2;
+      this.gestures.setViewZoom(z2);
+      this.applyPageZoom();
+      return;
+    }
+
+    const scroll = this.scrollEl;
+    const srect = scroll.getBoundingClientRect();
+    const fx = focalClientX ?? srect.left + srect.width / 2;
+    const fy = focalClientY ?? srect.top + srect.height / 2;
+    // Content coordinate under focal point before zoom
+    const contentX = (scroll.scrollLeft + (fx - srect.left)) / z1;
+    const contentY = (scroll.scrollTop + (fy - srect.top)) / z1;
+
+    this.viewZoom = z2;
+    this.gestures.setViewZoom(z2);
+    this.applyPageZoom();
+
+    scroll.scrollLeft = contentX * z2 - (fx - srect.left);
+    scroll.scrollTop = contentY * z2 - (fy - srect.top);
+    this.requestRedraw();
+  }
+
+  private bumpZoom(factor: number) {
+    this.setZoom(this.viewZoom * factor);
+  }
+
+  private applyPageZoom() {
+    const z = this.viewZoom || 1;
+    const w = this.cssW || this.pageEl.clientWidth || 1;
+    const h = this.cssH || this.pageEl.clientHeight || 1;
+    if (this.zoomPadEl) {
+      this.zoomPadEl.style.width = `${Math.max(1, w * z)}px`;
+      this.zoomPadEl.style.height = `${Math.max(1, h * z)}px`;
+    }
+    this.pageEl.style.width = `${w}px`;
+    this.pageEl.style.minHeight = `${h}px`;
+    this.pageEl.style.transform = z === 1 ? "" : `scale(${z})`;
+    this.pageEl.style.transformOrigin = "0 0";
+    this.gestures.setViewZoom(z);
+  }
+
   cycleTool() {
     this.finishStrokeIfNeeded();
     this.setNavigate(false);
@@ -1070,6 +1144,14 @@ export class PyoInkView extends ItemView {
     c.addEventListener(
       "wheel",
       (ev) => {
+        if (ev.ctrlKey || ev.metaKey) {
+          if (this.plugin.settings.enablePinchZoom === false) return;
+          // ctrl-wheel = zoom (trackpad pinch on many desktops)
+          const factor = ev.deltaY < 0 ? 1.08 : 1 / 1.08;
+          this.setZoom(this.viewZoom * factor, ev.clientX, ev.clientY);
+          ev.preventDefault();
+          return;
+        }
         this.scrollEl.scrollTop += ev.deltaY;
         this.scrollEl.scrollLeft += ev.deltaX;
         ev.preventDefault();
@@ -1087,8 +1169,9 @@ export class PyoInkView extends ItemView {
       if (ev.pointerType !== "pen" && ev.pointerType !== "mouse") return;
 
       const rect = c.getBoundingClientRect();
-      this.cursorX = ev.clientX - rect.left;
-      this.cursorY = ev.clientY - rect.top;
+      const z = this.viewZoom || 1;
+      this.cursorX = (ev.clientX - rect.left) / z;
+      this.cursorY = (ev.clientY - rect.top) / z;
       this.cursorOn = true;
       if (typeof ev.pressure === "number" && ev.pressure > 0) {
         this.cursorPressure = ev.pressure;
@@ -1146,6 +1229,24 @@ export class PyoInkView extends ItemView {
     switch (action.type) {
       case "scroll":
       case "ignore":
+        return;
+      case "pinch": {
+        // End any stuck single-finger scroll when pinch starts
+        if (this.scrollTouchId != null) {
+          const id = this.scrollTouchId;
+          this.scrollTouchId = null;
+          this.gestures.releasePointer(id, "touch");
+          try {
+            this.canvas.releasePointerCapture(id);
+          } catch {
+            /* */
+          }
+        }
+        this.setZoom(action.scale, action.centerClientX, action.centerClientY);
+        ev.preventDefault();
+        return;
+      }
+      case "pinch-end":
         return;
       case "navigate-click": {
         const opened = this.clickThrough(action.clientX, action.clientY);
@@ -1456,6 +1557,7 @@ export class PyoInkView extends ItemView {
     this.cssH = h;
     this.pageEl.style.width = `${w}px`;
     this.pageEl.style.minHeight = `${h}px`;
+    this.applyPageZoom();
 
     this.canvas.width = Math.max(1, Math.floor(w * dpr));
     this.canvas.height = Math.max(1, Math.floor(h * dpr));

@@ -84,6 +84,16 @@ export interface PyoInkSettings {
   enablePencilDoubleTapProbe?: boolean;
   penOnlyInk: boolean;
   allowFingerDraw: boolean;
+  /**
+   * When true: pen channel = ink only; touch channel = pan/zoom/gestures only.
+   * Forces penOnlyInk and disables finger drawing. Recommended for iPad + Pencil.
+   */
+  strictPenTouchSeparate: boolean;
+  /** Two-finger pinch to zoom the note+ink page. */
+  enablePinchZoom: boolean;
+  /** Min/max page zoom (1 = 100%). */
+  minZoom: number;
+  maxZoom: number;
   palmRejectMs: number;
   simulatePressureFallback: boolean;
   pressureGain: number;
@@ -152,6 +162,10 @@ export const DEFAULT_SETTINGS: PyoInkSettings = {
   pencilSingleTapAction: "ink",
   penOnlyInk: true,
   allowFingerDraw: false,
+  strictPenTouchSeparate: true,
+  enablePinchZoom: true,
+  minZoom: 0.5,
+  maxZoom: 3,
   palmRejectMs: 700,
   simulatePressureFallback: true,
   pressureGain: 1.2,
@@ -193,6 +207,20 @@ export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined
   s.toolbarXPct = clamp(Number(s.toolbarXPct), 5, 95);
   s.toolbarYPct = clamp(Number(s.toolbarYPct), 5, 95);
   if (s.penOnlyInk === undefined) s.penOnlyInk = true;
+  if (s.strictPenTouchSeparate === undefined) s.strictPenTouchSeparate = true;
+  if (s.enablePinchZoom === undefined) s.enablePinchZoom = true;
+  s.minZoom = clamp(Number(s.minZoom ?? 0.5), 0.25, 1);
+  s.maxZoom = clamp(Number(s.maxZoom ?? 3), 1, 5);
+  if (s.minZoom > s.maxZoom) {
+    const t = s.minZoom;
+    s.minZoom = s.maxZoom;
+    s.maxZoom = t;
+  }
+  // Strict channels: pen inks, touch never inks
+  if (s.strictPenTouchSeparate) {
+    s.penOnlyInk = true;
+    s.allowFingerDraw = false;
+  }
   if (s.penOnlyInk) s.allowFingerDraw = false;
   if (!Array.isArray(s.toolCycle) || s.toolCycle.length === 0) {
     s.toolCycle = [...DEFAULT_SETTINGS.toolCycle];
