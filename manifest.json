@@ -1,7 +1,7 @@
 {
   "id": "pyoink",
   "name": "PyoInk",
-  "version": "0.5.11",
+  "version": "0.6.0",
   "minAppVersion": "1.5.0",
   "description": "Transparent ink on Markdown notes, PDFs, and images. Pen/highlighter/eraser overlay; strokes saved as JSON sidecars without editing the source file.",
   "author": "organic4597",

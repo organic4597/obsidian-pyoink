@@ -1744,39 +1744,45 @@ export class PyoInkView extends ItemView {
       inkLog("E_SCROLL_STUCK", reason);
     };
 
-    /**
-     * True tip contact. buttons only for *starting* a stroke.
-     * While already stroking, we keep sampling until pointerup (buttons can
-     * flicker 0 mid-glyph on iPad — that must NOT end the stroke).
-     */
-    const penTipDown = (ev: PointerEvent) => ev.buttons > 0;
-
-    /** True while hand must not pan (writing session). */
+    /** Palm pan blocked while pen tip down or recent pen writing. */
     const palmPanBlocked = () =>
       this.gestures.blocksFingerPan(this.plugin.settings) ||
       this.state === "stroking" ||
       this.engine.isStroking();
 
-    const canvasRect = () => c.getBoundingClientRect();
-
-    const updatePenHover = (ev: PointerEvent) => {
-      if (this.dragBound || this.gestures.navigateMode) return;
-      const rect = canvasRect();
+    const rectOf = () => c.getBoundingClientRect();
+    const samplePen = (ev: PointerEvent) => {
+      const rect = rectOf();
       const z = this.viewZoom || 1;
-      this.cursorX = (ev.clientX - rect.left) / z;
-      this.cursorY = (ev.clientY - rect.top) / z;
+      const pr = typeof ev.pressure === "number" && ev.pressure > 0 ? ev.pressure : 0.5;
+      return {
+        x: (ev.clientX - rect.left) / z,
+        y: (ev.clientY - rect.top) / z,
+        pressure: pr,
+        t: ev.timeStamp || performance.now(),
+        pointerType: "pen",
+      };
+    };
+
+    const setHoverFromEvent = (ev: PointerEvent) => {
+      if (this.dragBound || this.gestures.navigateMode) return;
+      if (ev.pointerType !== "pen" && ev.pointerType !== "mouse") return;
+      const s = samplePen(ev);
+      this.cursorX = s.x;
+      this.cursorY = s.y;
       this.cursorOn = true;
-      if (typeof ev.pressure === "number" && ev.pressure > 0 && penTipDown(ev)) {
-        this.cursorPressure = ev.pressure;
-      } else {
-        this.cursorPressure = 0.5;
-      }
+      this.cursorPressure = ev.buttons > 0 && s.pressure > 0 ? s.pressure : 0.5;
       if (this.state === "ready" || this.state === "stroking") this.requestRedraw();
     };
 
-    /** End stroke only here (pointerup) — never on move / soft-lift. */
-    const commitOpenStrokeNow = () => {
-      if (!this.engine.isStroking() && !this.gestures.isDrawing()) return;
+    /** Active pen stroke pointer id (simple latch — no soft-lift nonsense). */
+    let penStrokeId: number | null = null;
+
+    const endPenStroke = (pointerId: number) => {
+      if (penStrokeId !== pointerId && !this.engine.isStroking()) {
+        penStrokeId = null;
+        return;
+      }
       if (this.engine.isStroking()) {
         const changed = this.engine.end();
         if (changed) {
@@ -1797,141 +1803,179 @@ export class PyoInkView extends ItemView {
         }
       }
       this.gestures.clearActiveDraw();
+      this.gestures.releasePointer(pointerId, "pen");
+      penStrokeId = null;
       this.state = "ready";
+      this.setPenInkingUi(false);
+      this.clearTextSelection();
+      if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
+      if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
       this.requestRedraw();
+      try {
+        c.releasePointerCapture(pointerId);
+      } catch {
+        /* */
+      }
     };
 
-    const startPenInk = (ev: PointerEvent, rect: DOMRect) => {
-      if (this.gestures.navigateMode) return false;
-      if (!penTipDown(ev)) return false;
-      // Already in a stroke for this pen — do NOT restart (was cutting every glyph)
-      if (this.engine.getActive() || this.gestures.isDrawing()) {
-        this.gestures.stickyPenContact(ev.pointerId);
-        if (this.gestures.getActiveDrawId() !== ev.pointerId) {
-          this.gestures.bindPenForEnd(ev.pointerId);
-        }
-        return true;
-      }
-      this.setPenInkingUi(true);
-      this.clearTextSelection();
+    const beginPenStroke = (ev: PointerEvent) => {
+      if (this.gestures.navigateMode) return;
+      // Already drawing this pen — ignore re-entry
+      if (penStrokeId === ev.pointerId && this.engine.getActive()) return;
+
+      // Kill palm pan
       if (this.scrollTouchId != null || this.flingRaf || this.panRaf) {
         stopFling();
         this.killPalmPanForPen(ev);
       } else {
         this.gestures.preemptForPen(ev.pointerId);
       }
+      this.setPenInkingUi(true);
+      this.clearTextSelection();
+      if (this.saveTimer) {
+        window.clearTimeout(this.saveTimer);
+        this.saveTimer = null;
+      }
+
+      penStrokeId = ev.pointerId;
+      this.gestures.forcePenDrawStart(ev.pointerId);
+      this.state = "stroking";
       try {
         c.setPointerCapture(ev.pointerId);
       } catch {
         /* */
       }
-      const action = this.gestures.forcePenDrawStart(ev.pointerId);
-      this.handleGesture(action, ev, rect);
-      updatePenHover(ev);
-      ev.preventDefault();
-      return true;
-    };
 
-    // Root capture: start on tip-down, extend on move, end ONLY on pointerup.
-    const onPenDownCapture = (ev: PointerEvent) => {
-      if (ev.pointerType !== "pen") return;
-      if (!penSurface.contains(ev.target as Node) && ev.target !== c) return;
-      if (this.gestures.navigateMode) return;
-      updatePenHover(ev);
-      if (penTipDown(ev)) startPenInk(ev, canvasRect());
-    };
-    const onPenMoveCapture = (ev: PointerEvent) => {
-      if (ev.pointerType !== "pen") return;
-      updatePenHover(ev);
-
-      const tip = penTipDown(ev);
-      const stroking =
-        this.engine.isStroking() ||
-        this.gestures.isDrawing() ||
-        this.engine.getActive() !== null;
-
-      // Hover only — never end a stroke here (soft-lift was cutting 획 mid-glyph)
-      if (!tip && !stroking) return;
-
-      const rect = canvasRect();
-
-      // Missed pointerdown: start only if tip is really down and no open stroke
-      if (tip && !stroking) {
-        startPenInk(ev, rect);
+      const s = samplePen(ev);
+      const tool = this.gestures.getTool();
+      if (tool === "eraser") {
+        this.engine.beginErase();
+        this.engine.eraseAt(s.x, s.y, this.eraserRadius());
+        this.cacheValid = false;
+      } else {
+        const color =
+          tool === "highlighter"
+            ? this.plugin.settings.highlighterColor
+            : this.plugin.settings.penColor;
+        const size =
+          tool === "highlighter"
+            ? this.plugin.settings.highlighterWidth
+            : this.plugin.settings.penWidth;
+        this.engine.beginPen(tool, color, size, [s.x, s.y, s.pressure, s.t]);
       }
+      setHoverFromEvent(ev);
+      this.requestRedraw();
+    };
 
-      // Extend open stroke until pointerup (even if buttons flickers to 0 briefly)
-      if (this.engine.getActive() || this.gestures.isDrawing()) {
-        this.gestures.stickyPenContact(ev.pointerId);
-        if (this.gestures.getActiveDrawId() == null) {
-          this.gestures.bindPenForEnd(ev.pointerId);
-        }
-        if (!this.engine.getActive() && tip) {
-          this.beginInkFromEvent(ev, rect);
-        } else if (this.engine.getActive()) {
-          const samples = this.gestures.collectSamples(ev, rect);
-          this.handleGesture(
-            { type: "draw-move", pointerId: ev.pointerId, samples },
-            ev,
-            rect,
+    const extendPenStroke = (ev: PointerEvent) => {
+      if (penStrokeId !== ev.pointerId && !this.engine.getActive()) return;
+      if (penStrokeId == null && this.engine.getActive()) penStrokeId = ev.pointerId;
+      this.gestures.stickyPenContact(ev.pointerId);
+
+      const list =
+        typeof ev.getCoalescedEvents === "function" && ev.getCoalescedEvents().length
+          ? ev.getCoalescedEvents()
+          : [ev];
+      const samples = list.map((e) => samplePen(e));
+
+      if (this.gestures.getTool() === "eraser") {
+        for (const s of samples) this.engine.eraseAt(s.x, s.y, this.eraserRadius());
+        this.cacheValid = false;
+      } else if (!this.engine.getActive()) {
+        // Should not happen mid-stroke; recover once
+        const s0 = samples[0];
+        if (!s0) return;
+        const tool = this.gestures.getTool();
+        if (tool !== "eraser") {
+          this.engine.beginPen(
+            tool,
+            tool === "highlighter"
+              ? this.plugin.settings.highlighterColor
+              : this.plugin.settings.penColor,
+            tool === "highlighter"
+              ? this.plugin.settings.highlighterWidth
+              : this.plugin.settings.penWidth,
+            [s0.x, s0.y, s0.pressure, s0.t],
           );
+          if (samples.length > 1) this.engine.extend(samples.slice(1));
         }
-        if (this.scrollTouchId != null) forceClearScroll("pen_move_writing");
+      } else {
+        this.engine.extend(samples);
+      }
+      setHoverFromEvent(ev);
+      if (this.scrollTouchId != null) forceClearScroll("pen_writing");
+      this.requestRedraw();
+    };
+
+    // ——— PEN: single canvas path (down → move → up). No root-capture races. ———
+    c.addEventListener(
+      "pointerdown",
+      (ev) => {
+        if (ev.pointerType !== "pen") return;
+        if (this.gestures.navigateMode) return;
+        setHoverFromEvent(ev);
+        // Tip down: buttons pressed (standard Pencil contact)
+        if (ev.buttons > 0) {
+          beginPenStroke(ev);
+          ev.preventDefault();
+        }
+      },
+      { capture: true },
+    );
+
+    c.addEventListener(
+      "pointermove",
+      (ev) => {
+        if (ev.pointerType !== "pen") return;
+        setHoverFromEvent(ev);
+
+        // Drawing: always extend until pointerup (ignore buttons flicker)
+        if (penStrokeId === ev.pointerId || this.engine.getActive()) {
+          extendPenStroke(ev);
+          ev.preventDefault();
+          return;
+        }
+
+        // Missed down recovery: tip pressed but no open stroke
+        if (ev.buttons > 0 && !this.gestures.navigateMode) {
+          beginPenStroke(ev);
+          extendPenStroke(ev);
+          ev.preventDefault();
+        }
+      },
+      { capture: true },
+    );
+
+    const penUp = (ev: PointerEvent) => {
+      if (ev.pointerType !== "pen") return;
+      setHoverFromEvent(ev);
+      if (penStrokeId === ev.pointerId || this.engine.isStroking() || this.engine.getActive()) {
+        endPenStroke(ev.pointerId);
         ev.preventDefault();
       }
     };
-    const onPenUpCapture = (ev: PointerEvent) => {
-      if (ev.pointerType !== "pen") return;
-      updatePenHover(ev);
-      // The ONLY place a stroke ends (real tip lift)
-      if (!this.engine.isStroking() && !this.gestures.isDrawing() && !this.engine.getActive()) {
-        this.setPenInkingUi(false);
-        return;
-      }
-      if (this.gestures.getActiveDrawId() !== ev.pointerId) {
-        this.gestures.bindPenForEnd(ev.pointerId);
-      }
-      commitOpenStrokeNow();
-      this.gestures.releasePointer(ev.pointerId, "pen");
-      try {
-        c.releasePointerCapture(ev.pointerId);
-      } catch {
-        /* */
-      }
-      this.setPenInkingUi(false);
-      this.clearTextSelection();
-      if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
-      if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
-      ev.preventDefault();
-    };
+    c.addEventListener("pointerup", penUp, { capture: true });
+    c.addEventListener("pointercancel", penUp, { capture: true });
 
-    penSurface.addEventListener("pointerdown", onPenDownCapture, { capture: true });
-    penSurface.addEventListener("pointermove", onPenMoveCapture, { capture: true });
-    penSurface.addEventListener("pointerup", onPenUpCapture, { capture: true });
-    penSurface.addEventListener("pointercancel", onPenUpCapture, { capture: true });
-
+    // ——— TOUCH / mouse (pan, pinch) — not pen ———
     c.addEventListener("pointerdown", (ev) => {
-      // Pencil handled in root capture
       if (ev.pointerType === "pen") return;
 
       if (this.state !== "ready" && this.state !== "stroking") {
         return;
       }
 
-      // Palm / hand while writing session: no pan/drag at all
+      // Palm / hand while writing: no pan/drag
       if (ev.pointerType === "touch" && palmPanBlocked()) {
         if (this.scrollTouchId != null) forceClearScroll("touch_during_write");
         this.gestures.clearAllTouchState();
         this.clearTextSelection();
-        inkLog("E_PALM", "block_scroll_writing_session");
         ev.preventDefault();
         return;
       }
 
-      // navigate: non-pen falls through
       if (this.gestures.navigateMode && ev.pointerType !== "pen") return;
 
-      // 2nd finger while panning: stop pan UI but KEEP first finger tracked → pinch works
       if (
         this.scrollTouchId != null &&
         this.scrollTouchId !== ev.pointerId &&
@@ -1943,13 +1987,11 @@ export class PyoInkView extends ItemView {
       }
 
       const rect = c.getBoundingClientRect();
-      // Keep first finger position fresh for pinch — but not while pen owns surface
       if (ev.pointerType === "touch" && !this.gestures.isPenContacting()) {
         this.gestures.notePointer(ev);
       }
       const action = this.gestures.onDown(ev, rect);
       if (action.type === "scroll" && (ev.pointerType === "touch" || ev.pointerType === "mouse")) {
-        // Refuse scroll during writing session / pen
         if (palmPanBlocked()) {
           ev.preventDefault();
           return;
@@ -1982,21 +2024,16 @@ export class PyoInkView extends ItemView {
     });
 
     c.addEventListener("pointermove", (ev) => {
-      // Pencil ink/hover handled in root capture (updatePenHover + draw-move)
-      if (ev.pointerType === "pen") return;
+      if (ev.pointerType === "pen") return; // handled above
 
-      // Touch during writing session / pen: never pan or select
       if (ev.pointerType === "touch" && palmPanBlocked()) {
-        if (this.scrollTouchId != null) {
-          forceClearScroll("writing_session_pan_block");
-        }
+        if (this.scrollTouchId != null) forceClearScroll("writing_session_pan_block");
         this.gestures.clearAllTouchState();
         this.clearTextSelection();
         ev.preventDefault();
         return;
       }
 
-      // In-progress palm pan: abort if writing session just started
       if (
         this.scrollTouchId === ev.pointerId &&
         this.gestures.blocksFingerPan(this.plugin.settings)
@@ -2006,16 +2043,13 @@ export class PyoInkView extends ItemView {
         return;
       }
 
-      // Always refresh touch coords so pinch startDist is accurate
       if (ev.pointerType === "touch") this.gestures.notePointer(ev);
 
-      // Mid-pan second finger already down → switch this finger to pinch path
       if (
         this.scrollTouchId === ev.pointerId &&
         (this.gestures.getFingerCount() >= 2 || this.gestures.isPinching())
       ) {
         endPanUiOnly("move_while_multi");
-        // fall through to gesture/pinch
       } else if (this.scrollTouchId === ev.pointerId) {
         const samples =
           typeof ev.getCoalescedEvents === "function" && ev.getCoalescedEvents().length
@@ -2049,23 +2083,15 @@ export class PyoInkView extends ItemView {
         return;
       }
 
-      if (this.gestures.navigateMode && ev.pointerType !== "pen" && !this.gestures.isDrawing())
-        return;
-      if (
-        (ev.pointerType === "pen" || ev.pointerType === "mouse") &&
-        ev.buttons === 0 &&
-        !this.gestures.isDrawing()
-      ) {
-        return;
-      }
+      if (this.gestures.navigateMode && !this.gestures.isDrawing()) return;
+      if (ev.pointerType === "mouse" && ev.buttons === 0 && !this.gestures.isDrawing()) return;
       const rect = c.getBoundingClientRect();
       const action = this.gestures.onMove(ev, rect);
       this.handleGesture(action, ev, rect);
     });
 
     const up = (ev: PointerEvent) => {
-      // Pen up handled in root capture (single commit path for Hangul jamo)
-      if (ev.pointerType === "pen") return;
+      if (ev.pointerType === "pen") return; // penUp above
       if (endScroll(ev)) return;
       const rect = c.getBoundingClientRect();
       const action = this.gestures.onUp(ev, rect);
@@ -2073,9 +2099,8 @@ export class PyoInkView extends ItemView {
     };
     c.addEventListener("pointerup", up);
     c.addEventListener("pointercancel", (ev) => {
-      if (endScroll(ev)) {
-        return;
-      }
+      if (ev.pointerType === "pen") return;
+      if (endScroll(ev)) return;
       const action = this.gestures.onCancel(ev);
       this.handleGesture(action, ev, c.getBoundingClientRect());
     });
@@ -2083,10 +2108,8 @@ export class PyoInkView extends ItemView {
       if (this.scrollTouchId === ev.pointerId) {
         forceClearScroll("lostpointercapture");
       }
-      // If capture lost mid-stroke, end cleanly
-      if (this.gestures.getActiveDrawId() === ev.pointerId) {
-        const action = this.gestures.onCancel(ev);
-        this.handleGesture(action, ev, c.getBoundingClientRect());
+      if (ev.pointerType === "pen" && (penStrokeId === ev.pointerId || this.engine.isStroking())) {
+        endPenStroke(ev.pointerId);
       }
     });
 
@@ -2095,7 +2118,6 @@ export class PyoInkView extends ItemView {
       (ev) => {
         if (ev.ctrlKey || ev.metaKey) {
           if (this.plugin.settings.enablePinchZoom === false) return;
-          // ctrl-wheel = zoom (trackpad pinch on many desktops)
           const factor = ev.deltaY < 0 ? 1.08 : 1 / 1.08;
           this.setZoom(this.viewZoom * factor, ev.clientX, ev.clientY);
           ev.preventDefault();
@@ -2108,65 +2130,28 @@ export class PyoInkView extends ItemView {
       { passive: false },
     );
 
-    // Hover / tip preview — pen also updated in root capture (updatePenHover)
-    const updateHover = (ev: PointerEvent) => {
-      if (this.dragBound) return;
-      if (this.gestures.navigateMode) return;
-      if (ev.pointerType === "touch") return;
-      if (ev.pointerType !== "pen" && ev.pointerType !== "mouse") return;
-      if (ev.pointerType === "pen") {
-        updatePenHover(ev);
-        return;
+    // Hover for mouse; pen hover is in pen pointermove
+    c.addEventListener(
+      "pointermove",
+      (ev) => {
+        if (ev.pointerType === "mouse" && ev.buttons === 0) setHoverFromEvent(ev);
+      },
+      { passive: true },
+    );
+    c.addEventListener("pointerenter", (ev) => {
+      if (ev.pointerType === "pen" || ev.pointerType === "mouse") {
+        this.cursorOn = true;
+        setHoverFromEvent(ev);
+        this.updateCanvasCursor();
       }
-      const rect = c.getBoundingClientRect();
-      const z = this.viewZoom || 1;
-      this.cursorX = (ev.clientX - rect.left) / z;
-      this.cursorY = (ev.clientY - rect.top) / z;
-      this.cursorOn = true;
-      this.cursorPressure = 0.5;
-      if (this.state === "ready" || this.state === "stroking") this.requestRedraw();
-    };
-    c.addEventListener("pointermove", updateHover, { capture: true, passive: true });
-    c.addEventListener(
-      "pointerrawupdate" as keyof HTMLElementEventMap,
-      updateHover as EventListener,
-      { capture: true, passive: true },
-    );
-    penSurface.addEventListener(
-      "pointerrawupdate" as keyof HTMLElementEventMap,
-      ((ev: PointerEvent) => {
-        if (ev.pointerType === "pen") updatePenHover(ev);
-      }) as EventListener,
-      { capture: true, passive: true },
-    );
-    c.addEventListener(
-      "pointerenter",
-      (ev) => {
-        if (ev.pointerType === "pen" || ev.pointerType === "mouse") {
-          this.cursorOn = true;
-          updateHover(ev);
-          this.updateCanvasCursor();
-        }
-      },
-      { capture: true },
-    );
-    c.addEventListener(
-      "pointerleave",
-      (ev) => {
-        if (ev.pointerType === "touch") return;
-        if (ev.buttons !== 0) return;
-        this.cursorOn = false;
-        this.requestRedraw();
-      },
-      { capture: true },
-    );
-    c.addEventListener(
-      "pointerover",
-      (ev) => {
-        if (ev.pointerType === "pen" || ev.pointerType === "mouse") updateHover(ev);
-      },
-      { capture: true },
-    );
+    });
+    c.addEventListener("pointerleave", (ev) => {
+      if (ev.pointerType === "touch") return;
+      if (ev.buttons !== 0) return;
+      if (penStrokeId != null) return; // still drawing with capture
+      this.cursorOn = false;
+      this.requestRedraw();
+    });
     this.updateCanvasCursor();
   }
 
@@ -2480,7 +2465,7 @@ export class PyoInkView extends ItemView {
       snapshotAt: Date.now(),
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.5.11";
+    this.doc.meta.appVersion = "0.6.0";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new Notice("PyoInk: remote ink changed — saving local will overwrite");

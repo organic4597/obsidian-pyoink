@@ -257,6 +257,27 @@ export class StrokeEngine {
   }
 
   private paintStroke(ctx: CanvasRenderingContext2D, s: InkStroke, last: boolean) {
+    if (s.points.length === 0) return;
+
+    // Pen/eraser: always draw a reliable round polyline first so Hangul jamo
+    // never vanish. Optional perfect-freehand outline on longer strokes only.
+    if (s.tool !== "highlighter") {
+      this.paintReliablePolyline(ctx, s);
+      // PF polish only when stroke is long enough to be stable
+      if (s.points.length >= 16) {
+        const simulate =
+          this.settings.simulatePressureFallback &&
+          (s === this.active ? !this.sawRealPressure : pressureMostlyFlat(s.points));
+        const style = { tool: s.tool, color: s.color, size: s.size };
+        const path = buildStrokePath(s.points, style, this.settings, {
+          last,
+          simulatePressure: simulate,
+        });
+        if (path) fillStrokePath(ctx, path, style, false);
+      }
+      return;
+    }
+
     const simulate =
       this.settings.simulatePressureFallback &&
       (s === this.active ? !this.sawRealPressure : pressureMostlyFlat(s.points));
@@ -269,18 +290,22 @@ export class StrokeEngine {
       fillStrokePath(ctx, path, style, false);
       return;
     }
-    // Absolute last resort — never leave Hangul jamo invisible
-    if (s.points.length === 0) return;
+    this.paintReliablePolyline(ctx, s);
+  }
+
+  /** Guaranteed-visible stroke: round polyline (works for 1–N points). */
+  private paintReliablePolyline(ctx: CanvasRenderingContext2D, s: InkStroke) {
     ctx.save();
     ctx.globalAlpha = s.tool === "highlighter" ? 0.4 : 1;
+    ctx.globalCompositeOperation = "source-over";
     ctx.strokeStyle = s.color;
     ctx.fillStyle = s.color;
-    ctx.lineWidth = Math.max(1, s.size);
+    ctx.lineWidth = Math.max(1.2, s.size);
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     if (s.points.length === 1) {
       ctx.beginPath();
-      ctx.arc(s.points[0][0], s.points[0][1], Math.max(0.6, s.size * 0.45), 0, Math.PI * 2);
+      ctx.arc(s.points[0][0], s.points[0][1], Math.max(0.7, s.size * 0.5), 0, Math.PI * 2);
       ctx.fill();
     } else {
       ctx.beginPath();
