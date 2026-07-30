@@ -225,10 +225,15 @@ export class GestureRouter {
     }
   }
 
-  /** Palm guard for ink — includes short post-pen window. */
+  /**
+   * Palm guard for *touch* only (never delays Pencil).
+   * Tip-down always owns; after lift only a tiny palmRejectMs window.
+   */
   private penOwnsSurface(s: PyoInkSettings): boolean {
     if (this.penTipDown()) return true;
-    if (performance.now() - this.lastPenAt < (s.palmRejectMs ?? 600)) return true;
+    const win = s.palmRejectMs ?? 50;
+    if (win <= 0) return false;
+    if (performance.now() - this.lastPenAt < win) return true;
     return false;
   }
 

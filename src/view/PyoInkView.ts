@@ -1687,10 +1687,20 @@ export class PyoInkView extends ItemView {
 
     c.addEventListener("pointerdown", (ev) => {
       if (ev.pointerType === "pen") {
-        // ALWAYS kill palm drag — hand rest under the note is the usual
-        // reason the next stroke is ignored (scrollTouchId / capture steals).
-        stopFling();
-        this.killPalmPanForPen(ev);
+        // Zero intentional wait on re-down. Only tear down palm pan if it
+        // is actually active — otherwise just mark pen ownership (cheap).
+        if (
+          this.scrollTouchId != null ||
+          this.flingRaf ||
+          this.panRaf ||
+          this.canvas.classList.contains("is-pass-through")
+        ) {
+          stopFling();
+          this.killPalmPanForPen(ev);
+        } else {
+          this.gestures.preemptForPen(ev.pointerId);
+          if (this.state !== "ready" && this.state !== "stroking") this.state = "ready";
+        }
       } else if (this.state !== "ready" && this.state !== "stroking") {
         return;
       }
@@ -2135,8 +2145,8 @@ export class PyoInkView extends ItemView {
         return;
       }
       case "draw-end": {
-        // Free the pen channel FIRST so the next tip-down is never blocked
-        // by stamp/cache/UI work from this lift.
+        // Free pen channel immediately — no wait before next tip-down.
+        // Cache stamp / chrome always next frame so lift never blocks re-ink.
         const changed = this.engine.end();
         this.state = "ready";
         this.gestures.clearActiveDraw();
@@ -2147,7 +2157,25 @@ export class PyoInkView extends ItemView {
         }
 
         const finished = changed ? this.engine.takeLastFinished() : null;
-        const doStamp = () => {
+        requestAnimationFrame(() => {
+          // Skip if user already started the next stroke (don't hitch mid-ink)
+          if (this.state === "stroking" || this.engine.isStroking()) {
+            if (changed) {
+              this.markDirty();
+              if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
+                this.engine.stampStrokeToCache(
+                  this.cacheCanvas,
+                  finished,
+                  this.cssW,
+                  this.cssH,
+                  window.devicePixelRatio || 1,
+                );
+              } else if (changed) {
+                this.cacheValid = false;
+              }
+            }
+            return;
+          }
           if (changed) {
             this.markDirty();
             const dpr = window.devicePixelRatio || 1;
@@ -2167,13 +2195,7 @@ export class PyoInkView extends ItemView {
           if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
           this.requestRedraw();
           if (this.remoteNewer && !this.dirty) void this.reloadFromDisk();
-        };
-        // Short strokes: stamp sync (cheap). Long strokes: next frame so re-down is instant.
-        if (!finished || finished.points.length < 120) {
-          doStamp();
-        } else {
-          requestAnimationFrame(doStamp);
-        }
+        });
         return;
       }
     }
@@ -2264,7 +2286,7 @@ export class PyoInkView extends ItemView {
       snapshotAt: Date.now(),
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.5.4";
+    this.doc.meta.appVersion = "0.5.5";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new Notice("PyoInk: remote ink changed — saving local will overwrite");

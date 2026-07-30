@@ -704,10 +704,15 @@ var GestureRouter = class {
       this.clearActiveDraw();
     }
   }
-  /** Palm guard for ink — includes short post-pen window. */
+  /**
+   * Palm guard for *touch* only (never delays Pencil).
+   * Tip-down always owns; after lift only a tiny palmRejectMs window.
+   */
   penOwnsSurface(s2) {
     if (this.penTipDown()) return true;
-    if (performance.now() - this.lastPenAt < (s2.palmRejectMs ?? 600)) return true;
+    const win = s2.palmRejectMs ?? 50;
+    if (win <= 0) return false;
+    if (performance.now() - this.lastPenAt < win) return true;
     return false;
   }
   fingerMayDraw(s2) {
@@ -1095,7 +1100,7 @@ function emptyDoc(source) {
       createdAt: now,
       updatedAt: now,
       appId: "pyoink",
-      appVersion: "0.5.4"
+      appVersion: "0.5.5"
     }
   };
 }
@@ -1462,8 +1467,11 @@ var DEFAULT_SETTINGS = {
   enablePinchZoom: true,
   minZoom: 0.5,
   maxZoom: 3,
-  /** Post-pen palm window (ms). Low = snappier re-ink after lift (~1/3 of old 700). */
-  palmRejectMs: 220,
+  /**
+   * After pen lift, block touch-as-ink for this many ms (palm safety only).
+   * Does not delay Pencil re-down. Default 50ms (0.05s) — near zero.
+   */
+  palmRejectMs: 50,
   simulatePressureFallback: true,
   pressureGain: 1.2,
   /** Outline smoothing (perfect-freehand). Higher = smoother stroke edges. */
@@ -1510,7 +1518,7 @@ function sanitizeSettings(raw) {
   s2.undoLimit = clamp(Number(s2.undoLimit), 1, 50);
   {
     const rawPalm = Number(raw?.palmRejectMs);
-    if (rawPalm === 700) s2.palmRejectMs = 220;
+    if (rawPalm === 700 || rawPalm === 220 || rawPalm === 600) s2.palmRejectMs = 50;
   }
   s2.palmRejectMs = clamp(Number(s2.palmRejectMs), 0, 3e3);
   s2.toolbarXPct = clamp(Number(s2.toolbarXPct), 5, 95);
@@ -2984,8 +2992,13 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     };
     c2.addEventListener("pointerdown", (ev) => {
       if (ev.pointerType === "pen") {
-        stopFling();
-        this.killPalmPanForPen(ev);
+        if (this.scrollTouchId != null || this.flingRaf || this.panRaf || this.canvas.classList.contains("is-pass-through")) {
+          stopFling();
+          this.killPalmPanForPen(ev);
+        } else {
+          this.gestures.preemptForPen(ev.pointerId);
+          if (this.state !== "ready" && this.state !== "stroking") this.state = "ready";
+        }
       } else if (this.state !== "ready" && this.state !== "stroking") {
         return;
       }
@@ -3344,7 +3357,24 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         } catch {
         }
         const finished = changed ? this.engine.takeLastFinished() : null;
-        const doStamp = () => {
+        requestAnimationFrame(() => {
+          if (this.state === "stroking" || this.engine.isStroking()) {
+            if (changed) {
+              this.markDirty();
+              if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
+                this.engine.stampStrokeToCache(
+                  this.cacheCanvas,
+                  finished,
+                  this.cssW,
+                  this.cssH,
+                  window.devicePixelRatio || 1
+                );
+              } else if (changed) {
+                this.cacheValid = false;
+              }
+            }
+            return;
+          }
           if (changed) {
             this.markDirty();
             const dpr = window.devicePixelRatio || 1;
@@ -3364,12 +3394,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
           if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
           this.requestRedraw();
           if (this.remoteNewer && !this.dirty) void this.reloadFromDisk();
-        };
-        if (!finished || finished.points.length < 120) {
-          doStamp();
-        } else {
-          requestAnimationFrame(doStamp);
-        }
+        });
         return;
       }
     }
@@ -3450,7 +3475,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       snapshotAt: Date.now()
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.5.4";
+    this.doc.meta.appVersion = "0.5.5";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new import_obsidian2.Notice("PyoInk: remote ink changed \u2014 saving local will overwrite");

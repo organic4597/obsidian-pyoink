@@ -173,8 +173,11 @@ export const DEFAULT_SETTINGS: PyoInkSettings = {
   enablePinchZoom: true,
   minZoom: 0.5,
   maxZoom: 3,
-  /** Post-pen palm window (ms). Low = snappier re-ink after lift (~1/3 of old 700). */
-  palmRejectMs: 220,
+  /**
+   * After pen lift, block touch-as-ink for this many ms (palm safety only).
+   * Does not delay Pencil re-down. Default 50ms (0.05s) — near zero.
+   */
+  palmRejectMs: 50,
   simulatePressureFallback: true,
   pressureGain: 1.2,
   /** Outline smoothing (perfect-freehand). Higher = smoother stroke edges. */
@@ -222,10 +225,10 @@ export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined
   s.maxCanvasCssHeight = clamp(Number(s.maxCanvasCssHeight), 2048, 16384);
   // Hard cap 50-depth queue
   s.undoLimit = clamp(Number(s.undoLimit), 1, 50);
-  // Migrate stock 700ms palm window → snappier 220ms (≈1/3)
+  // Migrate older palm windows → 50ms (pen re-down is never gated on this)
   {
     const rawPalm = Number((raw as PyoInkSettings | null | undefined)?.palmRejectMs);
-    if (rawPalm === 700) s.palmRejectMs = 220;
+    if (rawPalm === 700 || rawPalm === 220 || rawPalm === 600) s.palmRejectMs = 50;
   }
   s.palmRejectMs = clamp(Number(s.palmRejectMs), 0, 3000);
   s.toolbarXPct = clamp(Number(s.toolbarXPct), 5, 95);
