@@ -356,6 +356,9 @@ var StrokeEngine = class {
     this.redoStack = [];
   }
   beginPen(tool, color, size, pt) {
+    if (this.active || this.erasing) {
+      this.end();
+    }
     this.pushUndo();
     this.sawRealPressure = false;
     this.lastPressure = pt[2];
@@ -367,6 +370,17 @@ var StrokeEngine = class {
       points: [pt],
       ended: false
     };
+  }
+  beginErase() {
+    if (this.active) {
+      this.end();
+    }
+    if (!this.erasing) {
+      this.pushUndo();
+      this.erasing = true;
+      this.eraseDirty = false;
+      this.eraseUndoPushed = true;
+    }
   }
   normalizePressure(raw, pointerType) {
     if (!Number.isFinite(raw) || raw <= 0) {
@@ -424,14 +438,6 @@ var StrokeEngine = class {
     if (this.active) {
       if (this.undoStack.length) this.strokes = this.undoStack.pop();
       this.active = null;
-    }
-  }
-  beginErase() {
-    if (!this.erasing) {
-      this.pushUndo();
-      this.erasing = true;
-      this.eraseDirty = false;
-      this.eraseUndoPushed = true;
     }
   }
   eraseAt(x2, y2, radius) {
@@ -563,6 +569,8 @@ var GestureRouter = class {
     /** Page zoom (CSS scale). Pointer samples are divided by this. */
     this.viewZoom = 1;
     this.pinch = null;
+    /** Cooldown after pinch so multi-finger tap doesn't fire */
+    this.lastPinchAt = 0;
   }
   setViewZoom(z) {
     this.viewZoom = Math.max(0.01, z || 1);
@@ -690,19 +698,20 @@ var GestureRouter = class {
     this.movedPx = 0;
     if (ev.pointerType === "pen") {
       const contacting = ev.buttons > 0;
-      if (contacting) {
-        this.penDownIds.clear();
-        this.penDownIds.add(ev.pointerId);
-        if (this.activeDrawId !== null && this.activeDrawId !== ev.pointerId) {
-          this.clearActiveDraw();
-        }
-        this.fingerIds.clear();
-        this.multiFingerAnchor = null;
-        this.multiFingerMaxMove = 0;
-        this.pinch = null;
-      } else {
+      if (!contacting) {
         this.penDownIds.delete(ev.pointerId);
+        this.lastPenAt = performance.now();
+        return { type: "ignore" };
       }
+      this.penDownIds.clear();
+      this.penDownIds.add(ev.pointerId);
+      if (this.activeDrawId !== null && this.activeDrawId !== ev.pointerId) {
+        this.clearActiveDraw();
+      }
+      this.fingerIds.clear();
+      this.multiFingerAnchor = null;
+      this.multiFingerMaxMove = 0;
+      this.pinch = null;
       this.lastPenAt = performance.now();
       this.penDownAt = performance.now();
     }
@@ -814,7 +823,7 @@ var GestureRouter = class {
       const tipTap = this.movedPx < 12 && holdMs < 200;
       if (tipTap && wasDrawing && performance.now() - this.lastShortcutAt > 200) {
         const now = performance.now();
-        if (sPen.enablePencilDoubleTap !== false && now - this.lastPenTapAt < 380 && Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 40) {
+        if (sPen.enablePencilDoubleTap === true && now - this.lastPenTapAt < 380 && Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 40) {
           this.lastPenTapAt = 0;
           this.lastShortcutAt = now;
           this.clearActiveDraw();
@@ -863,7 +872,7 @@ var GestureRouter = class {
         this.multiFingerAnchor = null;
         this.multiFingerMaxMove = 0;
         this.pinch = null;
-        if (!this.penOwnsSurface(s2) && dt < 380 && move < 22 && performance.now() - this.lastShortcutAt > 220) {
+        if (!this.penOwnsSurface(s2) && dt < 380 && move < 18 && performance.now() - this.lastShortcutAt > 220 && performance.now() - this.lastPinchAt > 450) {
           const action = count >= 3 ? s2.threeFingerTapAction : s2.twoFingerTapAction || (s2.enableTwoFingerToolCycle ? "cycle_tool" : "none");
           if (action && action !== "none") {
             this.lastShortcutAt = performance.now();
@@ -890,9 +899,6 @@ var GestureRouter = class {
       }
     }
     if (this.navigateMode && this.activeDrawId === null && ev.pointerType !== "pen" && this.movedPx < 8) {
-      return { type: "navigate-click", clientX: ev.clientX, clientY: ev.clientY };
-    }
-    if (!this.navigateMode && this.activeDrawId === ev.pointerId && ev.pointerType === "mouse" && this.movedPx < 6 && this.tool !== "eraser") {
       return { type: "navigate-click", clientX: ev.clientX, clientY: ev.clientY };
     }
     if (this.activeDrawId === ev.pointerId) {
@@ -985,6 +991,7 @@ var GestureRouter = class {
     const factor = dist / Math.max(1, this.pinch.startDist);
     const next = this.pinch.startZoom * factor;
     this.multiFingerMaxMove = Math.max(this.multiFingerMaxMove, Math.abs(dist - this.pinch.startDist));
+    this.lastPinchAt = performance.now();
     return {
       type: "pinch",
       scale: next,
@@ -1030,7 +1037,7 @@ function emptyDoc(source) {
       createdAt: now,
       updatedAt: now,
       appId: "pyoink",
-      appVersion: "0.1.0"
+      appVersion: "0.3.3"
     }
   };
 }
@@ -1171,9 +1178,12 @@ var InkStore = class {
   constructor(app, settings) {
     this.app = app;
     this.settings = settings;
-    this.saving = false;
-    this.pending = false;
     this.loadedMtime = 0;
+    /** Newest doc to persist */
+    this.pendingDoc = null;
+    /** Serialized save queue — always awaits full drain */
+    this.chain = Promise.resolve(true);
+    this.saving = false;
   }
   pathFor(sourcePath) {
     return annotationRelPath(this.settings().annotationsFolder, sourcePath);
@@ -1240,62 +1250,70 @@ var InkStore = class {
     }
   }
   /**
-   * Atomic-ish write: tmp then rename/replace.
-   * Never modifies source markdown.
+   * Queue latest doc and await until disk write of the newest snapshot finishes.
+   * Concurrent callers share one chain; only the latest doc is written each turn.
+   * Returns false only if the final write failed.
    */
   async save(doc) {
-    if (this.saving) {
-      this.pending = true;
-      return true;
-    }
+    this.pendingDoc = doc;
+    this.chain = this.chain.then(() => this.drain()).catch((e2) => {
+      inkLog("E_SAVE", e2);
+      return false;
+    });
+    return this.chain;
+  }
+  async drain() {
+    let ok = true;
     this.saving = true;
-    let ok = false;
     try {
-      if (!await this.ensureFolder()) {
-        ok = false;
-      } else {
-        const path = this.pathFor(doc.source);
-        const body = serializeInkDoc(doc);
-        const tmp = `${path}.tmp`;
-        try {
-          await this.app.vault.adapter.write(tmp, body);
-          try {
-            if (await this.app.vault.adapter.exists(path)) {
-              await this.app.vault.adapter.remove(path);
-            }
-            await this.app.vault.adapter.write(path, body);
-            try {
-              await this.app.vault.adapter.remove(tmp);
-            } catch {
-            }
-          } catch {
-            await this.app.vault.adapter.write(path, body);
-          }
-          const af = this.app.vault.getAbstractFileByPath(path);
-          if (af && "stat" in af) this.loadedMtime = af.stat.mtime;
-          ok = true;
-        } catch (e2) {
-          inkLog("E_SAVE", e2);
-          new import_obsidian.Notice("PyoInk: save failed \u2014 strokes kept in memory");
-          ok = false;
-          try {
-            await this.app.vault.adapter.remove(tmp);
-          } catch {
-          }
-        }
+      while (this.pendingDoc) {
+        const current = this.pendingDoc;
+        this.pendingDoc = null;
+        ok = await this.writeOnce(current);
       }
     } finally {
       this.saving = false;
-      if (this.pending) {
-        this.pending = false;
-      }
     }
     return ok;
   }
+  async writeOnce(doc) {
+    if (!await this.ensureFolder()) return false;
+    const path = this.pathFor(doc.source);
+    const body = serializeInkDoc(doc);
+    const tmp = `${path}.tmp`;
+    try {
+      await this.app.vault.adapter.write(tmp, body);
+      try {
+        if (await this.app.vault.adapter.exists(path)) {
+          await this.app.vault.adapter.remove(path);
+        }
+        await this.app.vault.adapter.write(path, body);
+        try {
+          await this.app.vault.adapter.remove(tmp);
+        } catch {
+        }
+      } catch {
+        await this.app.vault.adapter.write(path, body);
+      }
+      const af = this.app.vault.getAbstractFileByPath(path);
+      if (af && "stat" in af) this.loadedMtime = af.stat.mtime;
+      return true;
+    } catch (e2) {
+      inkLog("E_SAVE", e2);
+      new import_obsidian.Notice("PyoInk: save failed \u2014 strokes kept in memory");
+      try {
+        await this.app.vault.adapter.remove(tmp);
+      } catch {
+      }
+      return false;
+    }
+  }
+  hasPendingWrite() {
+    return this.saving || this.pendingDoc !== null;
+  }
+  /** @deprecated */
   consumePending() {
-    if (!this.pending) return false;
-    this.pending = false;
-    return true;
+    return this.pendingDoc !== null;
   }
   isSaving() {
     return this.saving;
@@ -1449,9 +1467,6 @@ function sanitizeSettings(raw) {
     s2.enablePencilDoubleTap = !!s2.enablePencilDoubleTapProbe;
   }
   if (s2.enablePencilDoubleTap === void 0) s2.enablePencilDoubleTap = false;
-  if (raw && raw.enablePencilDoubleTap === true) {
-    s2.enablePencilDoubleTap = false;
-  }
   s2.pencilDoubleTapAction = asFingerAction(
     s2.pencilDoubleTapAction,
     "cycle_tool"
@@ -1496,6 +1511,8 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.navBtn = null;
     this.propsToggleBtn = null;
     this.propsCollapsed = false;
+    this.saveBadgeEl = null;
+    this.zoomBadgeEl = null;
     this.dragBound = false;
     this.cursorX = -1;
     this.cursorY = -1;
@@ -1714,6 +1731,8 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     const zIn = tools.createEl("button", { cls: "pyoink-tb-icon", text: "+" });
     zIn.title = "Zoom in";
     zIn.onclick = () => this.bumpZoom(1.15);
+    this.zoomBadgeEl = tools.createSpan({ cls: "pyoink-zoom-badge", text: "100%" });
+    this.zoomBadgeEl.title = "Current zoom";
     const exit = tools.createEl("button", { cls: "pyoink-tb-icon" });
     exit.title = "Leave (save on exit)";
     this.setSvgIcon(exit, "exit");
@@ -1724,6 +1743,11 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       }
       if (this.file) await this.leaf.openFile(this.file);
     };
+    this.saveBadgeEl = this.toolbarEl.createDiv({
+      cls: "pyoink-status is-saved",
+      text: "Saved"
+    });
+    this.updateStatusChrome();
     this.propsEl = this.rootEl.createDiv({ cls: "pyoink-props" });
     this.propsToggleBtn = this.propsEl.createEl("button", {
       cls: "pyoink-props-toggle",
@@ -2216,6 +2240,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.viewZoom = z2;
     this.gestures.setViewZoom(z2);
     this.applyPageZoom();
+    this.updateStatusChrome();
     scroll.scrollLeft = contentX * z2 - (fx - srect.left);
     scroll.scrollTop = contentY * z2 - (fy - srect.top);
     this.requestRedraw();
@@ -2860,9 +2885,9 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         this.state = "ready";
         if (this.engine.canUndo()) {
           this.engine.undo();
-          this.cacheValid = false;
           this.markDirty();
         }
+        this.invalidateInkCache();
         try {
           this.canvas.releasePointerCapture(action.pointerId);
         } catch {
@@ -2995,8 +3020,13 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   markDirty() {
     this.dirty = true;
+    this.updateStatusChrome();
     if (this.engine.isStroking() || this.state === "stroking") return;
     this.scheduleSave();
+  }
+  /** Full cache rebuild required (undo/redo/erase/load). */
+  invalidateInkCache() {
+    this.cacheValid = false;
   }
   scheduleSave() {
     const ms = Math.max(12e3, this.plugin.settings.debounceMs || 12e3);
@@ -3011,12 +3041,13 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   async flushSave() {
     if (!this.file) return true;
-    if (!this.dirty && !this.store.isSaving()) return true;
+    if (!this.dirty && !this.store.isSaving() && !this.store.hasPendingWrite()) return true;
     if (this.engine.isStroking()) {
       this.engine.end();
-      this.cacheValid = false;
+      this.invalidateInkCache();
     }
     this.state = "saving";
+    this.updateStatusChrome();
     const live = measureLayout(
       this.pageEl,
       this.file.stat.mtime,
@@ -3034,6 +3065,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       snapshotAt: Date.now()
     };
     this.doc.strokes = this.engine.exportStrokes();
+    this.doc.meta.appVersion = "0.3.3";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new import_obsidian2.Notice("PyoInk: remote ink changed \u2014 saving local will overwrite");
@@ -3043,9 +3075,27 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       this.dirty = false;
       this.remoteNewer = false;
     }
-    if (this.store.consumePending()) return this.flushSave();
     this.state = "ready";
+    this.updateStatusChrome();
     return ok;
+  }
+  updateStatusChrome() {
+    if (this.saveBadgeEl) {
+      if (this.state === "saving" || this.store.isSaving()) {
+        this.saveBadgeEl.setText("Saving\u2026");
+        this.saveBadgeEl.className = "pyoink-status is-saving";
+      } else if (this.dirty) {
+        this.saveBadgeEl.setText("Unsaved");
+        this.saveBadgeEl.className = "pyoink-status is-dirty";
+      } else {
+        this.saveBadgeEl.setText("Saved");
+        this.saveBadgeEl.className = "pyoink-status is-saved";
+      }
+    }
+    if (this.zoomBadgeEl) {
+      const pct = Math.round((this.viewZoom || 1) * 100);
+      this.zoomBadgeEl.setText(`${pct}%`);
+    }
   }
   async reloadFromDisk() {
     if (!this.file || this.dirty || this.engine.isStroking()) return;

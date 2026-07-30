@@ -75,6 +75,8 @@ export class PyoInkView extends ItemView {
   private navBtn: HTMLButtonElement | null = null;
   private propsToggleBtn: HTMLButtonElement | null = null;
   private propsCollapsed = false;
+  private saveBadgeEl: HTMLElement | null = null;
+  private zoomBadgeEl: HTMLElement | null = null;
   private dragBound = false;
   private cursorX = -1;
   private cursorY = -1;
@@ -329,6 +331,9 @@ export class PyoInkView extends ItemView {
     zIn.title = "Zoom in";
     zIn.onclick = () => this.bumpZoom(1.15);
 
+    this.zoomBadgeEl = tools.createSpan({ cls: "pyoink-zoom-badge", text: "100%" });
+    this.zoomBadgeEl.title = "Current zoom";
+
     const exit = tools.createEl("button", { cls: "pyoink-tb-icon" });
     exit.title = "Leave (save on exit)";
     this.setSvgIcon(exit, "exit");
@@ -339,6 +344,12 @@ export class PyoInkView extends ItemView {
       }
       if (this.file) await this.leaf.openFile(this.file);
     };
+
+    this.saveBadgeEl = this.toolbarEl.createDiv({
+      cls: "pyoink-status is-saved",
+      text: "Saved",
+    });
+    this.updateStatusChrome();
 
     // ——— Left properties rail (Excalidraw style panel) ———
     this.propsEl = this.rootEl.createDiv({ cls: "pyoink-props" });
@@ -920,6 +931,7 @@ export class PyoInkView extends ItemView {
     this.viewZoom = z2;
     this.gestures.setViewZoom(z2);
     this.applyPageZoom();
+    this.updateStatusChrome();
 
     scroll.scrollLeft = contentX * z2 - (fx - srect.left);
     scroll.scrollTop = contentY * z2 - (fy - srect.top);
@@ -1659,16 +1671,16 @@ export class PyoInkView extends ItemView {
         this.runFingerAction(action.action);
         return;
       case "pen-double-tap": {
-        // Cancel in-progress stroke (2nd tip tap), drop first-tap ink if tiny
+        // 2nd tip: cancel in-progress tip stroke (restores pre-2nd state via undo stack)
         this.engine.cancel();
         this.gestures.clearActiveDraw();
         this.state = "ready";
-        // First tip tap usually committed a short stroke — undo it
+        // First tip was usually committed as a tiny stroke — remove it once (not cancel+double-pop)
         if (this.engine.canUndo()) {
           this.engine.undo();
-          this.cacheValid = false;
           this.markDirty();
         }
+        this.invalidateInkCache();
         try {
           this.canvas.releasePointerCapture(action.pointerId);
         } catch {
@@ -1820,9 +1832,15 @@ export class PyoInkView extends ItemView {
 
   private markDirty() {
     this.dirty = true;
+    this.updateStatusChrome();
     // Never hit disk mid-stroke; only after idle
     if (this.engine.isStroking() || this.state === "stroking") return;
     this.scheduleSave();
+  }
+
+  /** Full cache rebuild required (undo/redo/erase/load). */
+  private invalidateInkCache() {
+    this.cacheValid = false;
   }
 
   private scheduleSave() {
@@ -1840,12 +1858,13 @@ export class PyoInkView extends ItemView {
 
   async flushSave(): Promise<boolean> {
     if (!this.file) return true;
-    if (!this.dirty && !this.store.isSaving()) return true;
+    if (!this.dirty && !this.store.isSaving() && !this.store.hasPendingWrite()) return true;
     if (this.engine.isStroking()) {
       this.engine.end();
-      this.cacheValid = false;
+      this.invalidateInkCache();
     }
     this.state = "saving";
+    this.updateStatusChrome();
     const live = measureLayout(
       this.pageEl,
       this.file.stat.mtime,
@@ -1863,18 +1882,39 @@ export class PyoInkView extends ItemView {
       snapshotAt: Date.now(),
     };
     this.doc.strokes = this.engine.exportStrokes();
+    this.doc.meta.appVersion = "0.3.3";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new Notice("PyoInk: remote ink changed — saving local will overwrite");
     }
+    // store.save awaits full queue drain of latest snapshot
     const ok = await this.store.save(this.doc);
     if (ok) {
       this.dirty = false;
       this.remoteNewer = false;
     }
-    if (this.store.consumePending()) return this.flushSave();
     this.state = "ready";
+    this.updateStatusChrome();
     return ok;
+  }
+
+  private updateStatusChrome() {
+    if (this.saveBadgeEl) {
+      if (this.state === "saving" || this.store.isSaving()) {
+        this.saveBadgeEl.setText("Saving…");
+        this.saveBadgeEl.className = "pyoink-status is-saving";
+      } else if (this.dirty) {
+        this.saveBadgeEl.setText("Unsaved");
+        this.saveBadgeEl.className = "pyoink-status is-dirty";
+      } else {
+        this.saveBadgeEl.setText("Saved");
+        this.saveBadgeEl.className = "pyoink-status is-saved";
+      }
+    }
+    if (this.zoomBadgeEl) {
+      const pct = Math.round((this.viewZoom || 1) * 100);
+      this.zoomBadgeEl.setText(`${pct}%`);
+    }
   }
 
   private async reloadFromDisk() {

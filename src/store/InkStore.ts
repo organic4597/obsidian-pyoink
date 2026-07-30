@@ -12,9 +12,12 @@ import { inkLog } from "../util/errors";
 import type { PyoInkSettings } from "../util/settings";
 
 export class InkStore {
-  private saving = false;
-  private pending = false;
   private loadedMtime = 0;
+  /** Newest doc to persist */
+  private pendingDoc: InkDocV1 | null = null;
+  /** Serialized save queue — always awaits full drain */
+  private chain: Promise<boolean> = Promise.resolve(true);
+  private saving = false;
 
   constructor(
     private app: App,
@@ -41,7 +44,6 @@ export class InkStore {
       try {
         await this.app.vault.createFolder(folder);
       } catch (e) {
-        // race: already exists
         const again = this.app.vault.getAbstractFileByPath(folder);
         if (!(again instanceof TFolder)) {
           inkLog("E_STORE_FOLDER", e);
@@ -55,7 +57,6 @@ export class InkStore {
 
   async load(sourcePath: string): Promise<LoadResult> {
     const path = this.pathFor(sourcePath);
-    // legacy hermes-ink .hink.json
     const legacyPath = path.replace(/\.pyoink\.json$/i, ".hink.json");
     let af = this.app.vault.getAbstractFileByPath(path);
     if (!af) af = this.app.vault.getAbstractFileByPath(legacyPath);
@@ -81,7 +82,6 @@ export class InkStore {
       } else if (result.warnings.includes("E_SOURCE_MISMATCH")) {
         new Notice("PyoInk: ink file source path mismatch — check carefully");
       } else if (loadedFromLegacy && result.ok) {
-        // migrate to .pyoink.json on next save
         result.warnings.push("E_LEGACY_PATH");
       }
       return result;
@@ -93,68 +93,76 @@ export class InkStore {
   }
 
   /**
-   * Atomic-ish write: tmp then rename/replace.
-   * Never modifies source markdown.
+   * Queue latest doc and await until disk write of the newest snapshot finishes.
+   * Concurrent callers share one chain; only the latest doc is written each turn.
+   * Returns false only if the final write failed.
    */
   async save(doc: InkDocV1): Promise<boolean> {
-    if (this.saving) {
-      this.pending = true;
-      return true;
-    }
+    this.pendingDoc = doc;
+    this.chain = this.chain.then(() => this.drain()).catch((e) => {
+      inkLog("E_SAVE", e);
+      return false;
+    });
+    return this.chain;
+  }
+
+  private async drain(): Promise<boolean> {
+    let ok = true;
     this.saving = true;
-    let ok = false;
     try {
-      if (!(await this.ensureFolder())) {
-        ok = false;
-      } else {
-        const path = this.pathFor(doc.source);
-        const body = serializeInkDoc(doc);
-        const tmp = `${path}.tmp`;
-        try {
-          await this.app.vault.adapter.write(tmp, body);
-          // prefer rename
-          try {
-            if (await this.app.vault.adapter.exists(path)) {
-              await this.app.vault.adapter.remove(path);
-            }
-            // some adapters lack rename — write final
-            await this.app.vault.adapter.write(path, body);
-            try {
-              await this.app.vault.adapter.remove(tmp);
-            } catch {
-              /* ignore */
-            }
-          } catch {
-            await this.app.vault.adapter.write(path, body);
-          }
-          const af = this.app.vault.getAbstractFileByPath(path);
-          if (af && "stat" in af) this.loadedMtime = (af as TFile).stat.mtime;
-          ok = true;
-        } catch (e) {
-          inkLog("E_SAVE", e);
-          new Notice("PyoInk: save failed — strokes kept in memory");
-          ok = false;
-          try {
-            await this.app.vault.adapter.remove(tmp);
-          } catch {
-            /* ignore */
-          }
-        }
+      while (this.pendingDoc) {
+        const current = this.pendingDoc;
+        this.pendingDoc = null;
+        ok = await this.writeOnce(current);
       }
     } finally {
       this.saving = false;
-      if (this.pending) {
-        this.pending = false;
-        // caller should re-invoke with latest doc
-      }
     }
     return ok;
   }
 
+  private async writeOnce(doc: InkDocV1): Promise<boolean> {
+    if (!(await this.ensureFolder())) return false;
+    const path = this.pathFor(doc.source);
+    const body = serializeInkDoc(doc);
+    const tmp = `${path}.tmp`;
+    try {
+      await this.app.vault.adapter.write(tmp, body);
+      try {
+        if (await this.app.vault.adapter.exists(path)) {
+          await this.app.vault.adapter.remove(path);
+        }
+        await this.app.vault.adapter.write(path, body);
+        try {
+          await this.app.vault.adapter.remove(tmp);
+        } catch {
+          /* ignore */
+        }
+      } catch {
+        await this.app.vault.adapter.write(path, body);
+      }
+      const af = this.app.vault.getAbstractFileByPath(path);
+      if (af && "stat" in af) this.loadedMtime = (af as TFile).stat.mtime;
+      return true;
+    } catch (e) {
+      inkLog("E_SAVE", e);
+      new Notice("PyoInk: save failed — strokes kept in memory");
+      try {
+        await this.app.vault.adapter.remove(tmp);
+      } catch {
+        /* ignore */
+      }
+      return false;
+    }
+  }
+
+  hasPendingWrite(): boolean {
+    return this.saving || this.pendingDoc !== null;
+  }
+
+  /** @deprecated */
   consumePending(): boolean {
-    if (!this.pending) return false;
-    this.pending = false;
-    return true;
+    return this.pendingDoc !== null;
   }
 
   isSaving(): boolean {

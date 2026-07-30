@@ -61,7 +61,7 @@ function emptyDoc(source: string): InkDocV1 {
       createdAt: now,
       updatedAt: now,
       appId: "pyoink",
-      appVersion: "0.1.0",
+      appVersion: "0.3.3",
     },
   };
 }

@@ -51,6 +51,10 @@ export class StrokeEngine {
   }
 
   beginPen(tool: Exclude<InkTool, "eraser">, color: string, size: number, pt: PointTuple) {
+    // Never orphan an in-flight stroke / erase session
+    if (this.active || this.erasing) {
+      this.end();
+    }
     this.pushUndo();
     this.sawRealPressure = false;
     this.lastPressure = pt[2];
@@ -62,6 +66,18 @@ export class StrokeEngine {
       points: [pt],
       ended: false,
     };
+  }
+
+  beginErase() {
+    if (this.active) {
+      this.end();
+    }
+    if (!this.erasing) {
+      this.pushUndo();
+      this.erasing = true;
+      this.eraseDirty = false;
+      this.eraseUndoPushed = true;
+    }
   }
 
   private normalizePressure(raw: number, pointerType: string): number {
@@ -129,15 +145,6 @@ export class StrokeEngine {
       // drop unfinished stroke; undo already has pre-stroke state
       if (this.undoStack.length) this.strokes = this.undoStack.pop()!;
       this.active = null;
-    }
-  }
-
-  beginErase() {
-    if (!this.erasing) {
-      this.pushUndo();
-      this.erasing = true;
-      this.eraseDirty = false;
-      this.eraseUndoPushed = true;
     }
   }
 

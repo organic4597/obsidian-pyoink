@@ -73,6 +73,8 @@ export class GestureRouter {
         startZoom: number;
       }
     | null = null;
+  /** Cooldown after pinch so multi-finger tap doesn't fire */
+  private lastPinchAt = 0;
 
   constructor(private settings: () => PyoInkSettings) {}
 
@@ -227,21 +229,23 @@ export class GestureRouter {
     if (ev.pointerType === "pen") {
       // Contact only: buttons > 0. Pressure-only is unreliable (hover).
       const contacting = ev.buttons > 0;
-      if (contacting) {
-        this.penDownIds.clear();
-        this.penDownIds.add(ev.pointerId);
-        // Fresh stroke: drop any stale draw lock from previous lift race
-        if (this.activeDrawId !== null && this.activeDrawId !== ev.pointerId) {
-          this.clearActiveDraw();
-        }
-        // Clear touch-only junk lightly
-        this.fingerIds.clear();
-        this.multiFingerAnchor = null;
-        this.multiFingerMaxMove = 0;
-        this.pinch = null;
-      } else {
+      if (!contacting) {
+        // Hover / pre-contact — do not start ink
         this.penDownIds.delete(ev.pointerId);
+        this.lastPenAt = performance.now();
+        return { type: "ignore" };
       }
+      this.penDownIds.clear();
+      this.penDownIds.add(ev.pointerId);
+      // Fresh stroke: drop any stale draw lock from previous lift race
+      if (this.activeDrawId !== null && this.activeDrawId !== ev.pointerId) {
+        this.clearActiveDraw();
+      }
+      // Clear touch-only junk lightly
+      this.fingerIds.clear();
+      this.multiFingerAnchor = null;
+      this.multiFingerMaxMove = 0;
+      this.pinch = null;
       this.lastPenAt = performance.now();
       this.penDownAt = performance.now();
     }
@@ -386,7 +390,7 @@ export class GestureRouter {
         const now = performance.now();
         // Double-tap first
         if (
-          sPen.enablePencilDoubleTap !== false &&
+          sPen.enablePencilDoubleTap === true &&
           now - this.lastPenTapAt < 380 &&
           Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 40
         ) {
@@ -454,11 +458,13 @@ export class GestureRouter {
         this.pinch = null;
 
         // If fingers moved a lot, it was pinch/pan — not a tap
+        // Also suppress shortly after a real pinch zoom
         if (
           !this.penOwnsSurface(s) &&
           dt < 380 &&
-          move < 22 &&
-          performance.now() - this.lastShortcutAt > 220
+          move < 18 &&
+          performance.now() - this.lastShortcutAt > 220 &&
+          performance.now() - this.lastPinchAt > 450
         ) {
           const action =
             count >= 3
@@ -509,15 +515,7 @@ export class GestureRouter {
       return { type: "navigate-click", clientX: ev.clientX, clientY: ev.clientY };
     }
 
-    if (
-      !this.navigateMode &&
-      this.activeDrawId === ev.pointerId &&
-      ev.pointerType === "mouse" &&
-      this.movedPx < 6 &&
-      this.tool !== "eraser"
-    ) {
-      return { type: "navigate-click", clientX: ev.clientX, clientY: ev.clientY };
-    }
+    // Mouse short-click is NOT navigate outside nav mode (was accidental link opens)
 
     if (this.activeDrawId === ev.pointerId) {
       this.clearActiveDraw();
@@ -618,6 +616,7 @@ export class GestureRouter {
     const next = this.pinch.startZoom * factor;
     // Mark multi-finger as "moved" so short-tap shortcuts don't fire after pinch
     this.multiFingerMaxMove = Math.max(this.multiFingerMaxMove, Math.abs(dist - this.pinch.startDist));
+    this.lastPinchAt = performance.now();
     return {
       type: "pinch",
       scale: next,
