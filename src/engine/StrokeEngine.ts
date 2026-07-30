@@ -41,9 +41,18 @@ export class StrokeEngine {
     return list.map((s) => ({ ...s, points: s.points.map((p) => [...p] as PointTuple) }));
   }
 
+  /**
+   * Undo snapshots: committed strokes are immutable (points not mutated after end),
+   * so a shallow array copy is enough. Deep-cloning every pen-down was the main
+   * lift→re-down hitch with longer notes.
+   */
+  private snapshotStrokes(): InkStroke[] {
+    return this.strokes.slice();
+  }
+
   private pushUndo() {
     // FIFO queue: drop oldest when over undoLimit (cap 50 in settings)
-    this.undoStack.push(this.cloneStrokes(this.strokes));
+    this.undoStack.push(this.snapshotStrokes());
     const limit = Math.min(50, Math.max(1, this.settings.undoLimit || 50));
     while (this.undoStack.length > limit) this.undoStack.shift();
     // new branch kills redo (also queue-capped)
@@ -171,20 +180,21 @@ export class StrokeEngine {
   undo(): boolean {
     if (this.isStroking()) return false;
     if (!this.undoStack.length) return false;
-    this.redoStack.push(this.cloneStrokes(this.strokes));
+    this.redoStack.push(this.snapshotStrokes());
     const limit = Math.min(50, Math.max(1, this.settings.undoLimit || 50));
     while (this.redoStack.length > limit) this.redoStack.shift();
-    this.strokes = this.undoStack.pop()!;
+    // Restore a slice so later mutations never touch the stack entry
+    this.strokes = this.undoStack.pop()!.slice();
     return true;
   }
 
   redo(): boolean {
     if (this.isStroking()) return false;
     if (!this.redoStack.length) return false;
-    this.undoStack.push(this.cloneStrokes(this.strokes));
+    this.undoStack.push(this.snapshotStrokes());
     const limit = Math.min(50, Math.max(1, this.settings.undoLimit || 50));
     while (this.undoStack.length > limit) this.undoStack.shift();
-    this.strokes = this.redoStack.pop()!;
+    this.strokes = this.redoStack.pop()!.slice();
     return true;
   }
 

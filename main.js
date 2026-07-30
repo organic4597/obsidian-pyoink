@@ -349,8 +349,16 @@ var StrokeEngine = class {
   cloneStrokes(list) {
     return list.map((s2) => ({ ...s2, points: s2.points.map((p2) => [...p2]) }));
   }
+  /**
+   * Undo snapshots: committed strokes are immutable (points not mutated after end),
+   * so a shallow array copy is enough. Deep-cloning every pen-down was the main
+   * lift→re-down hitch with longer notes.
+   */
+  snapshotStrokes() {
+    return this.strokes.slice();
+  }
   pushUndo() {
-    this.undoStack.push(this.cloneStrokes(this.strokes));
+    this.undoStack.push(this.snapshotStrokes());
     const limit = Math.min(50, Math.max(1, this.settings.undoLimit || 50));
     while (this.undoStack.length > limit) this.undoStack.shift();
     this.redoStack = [];
@@ -462,19 +470,19 @@ var StrokeEngine = class {
   undo() {
     if (this.isStroking()) return false;
     if (!this.undoStack.length) return false;
-    this.redoStack.push(this.cloneStrokes(this.strokes));
+    this.redoStack.push(this.snapshotStrokes());
     const limit = Math.min(50, Math.max(1, this.settings.undoLimit || 50));
     while (this.redoStack.length > limit) this.redoStack.shift();
-    this.strokes = this.undoStack.pop();
+    this.strokes = this.undoStack.pop().slice();
     return true;
   }
   redo() {
     if (this.isStroking()) return false;
     if (!this.redoStack.length) return false;
-    this.undoStack.push(this.cloneStrokes(this.strokes));
+    this.undoStack.push(this.snapshotStrokes());
     const limit = Math.min(50, Math.max(1, this.settings.undoLimit || 50));
     while (this.undoStack.length > limit) this.undoStack.shift();
-    this.strokes = this.redoStack.pop();
+    this.strokes = this.redoStack.pop().slice();
     return true;
   }
   loadStrokes(strokes) {
@@ -715,7 +723,8 @@ var GestureRouter = class {
     this.downSample = sample;
     this.movedPx = 0;
     if (ev.pointerType === "pen") {
-      const contacting = ev.buttons > 0;
+      const pr = typeof ev.pressure === "number" ? ev.pressure : 0;
+      const contacting = ev.buttons > 0 || pr > 0.02;
       if (!contacting) {
         this.penDownIds.delete(ev.pointerId);
         this.lastPenAt = performance.now();
@@ -723,7 +732,7 @@ var GestureRouter = class {
       }
       this.penDownIds.clear();
       this.penDownIds.add(ev.pointerId);
-      if (this.activeDrawId !== null && this.activeDrawId !== ev.pointerId) {
+      if (this.activeDrawId !== null) {
         this.clearActiveDraw();
       }
       this.fingerIds.clear();
@@ -732,6 +741,7 @@ var GestureRouter = class {
       this.pinch = null;
       this.lastPenAt = performance.now();
       this.penDownAt = performance.now();
+      this.lastPenTapAt = 0;
     }
     if (ev.pointerType === "touch") {
       if (this.penTipDown()) {
@@ -840,9 +850,9 @@ var GestureRouter = class {
       const sample = this.sampleFromEvent(ev, canvasRect);
       const tipTap = this.movedPx < 10 && holdMs < 150;
       const tipTapEnabled = sPen.enablePencilDoubleTap === true || sPen.pencilSingleTapAction && sPen.pencilSingleTapAction !== "ink";
-      if (tipTap && wasDrawing && tipTapEnabled && performance.now() - this.lastShortcutAt > 50) {
+      if (tipTap && wasDrawing && tipTapEnabled && performance.now() - this.lastShortcutAt > 40) {
         const now = performance.now();
-        const dblWindow = 220;
+        const dblWindow = 80;
         if (sPen.enablePencilDoubleTap === true && this.lastPenTapAt > 0 && now - this.lastPenTapAt < dblWindow && Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 36) {
           this.lastPenTapAt = 0;
           this.lastShortcutAt = now;
@@ -1072,7 +1082,7 @@ function emptyDoc(source) {
       createdAt: now,
       updatedAt: now,
       appId: "pyoink",
-      appVersion: "0.5.2"
+      appVersion: "0.5.3"
     }
   };
 }
@@ -1439,7 +1449,8 @@ var DEFAULT_SETTINGS = {
   enablePinchZoom: true,
   minZoom: 0.5,
   maxZoom: 3,
-  palmRejectMs: 700,
+  /** Post-pen palm window (ms). Low = snappier re-ink after lift (~1/3 of old 700). */
+  palmRejectMs: 220,
   simulatePressureFallback: true,
   pressureGain: 1.2,
   /** Outline smoothing (perfect-freehand). Higher = smoother stroke edges. */
@@ -1484,6 +1495,10 @@ function sanitizeSettings(raw) {
   s2.debounceMs = clamp(Number(s2.debounceMs), 1e3, 6e4);
   s2.maxCanvasCssHeight = clamp(Number(s2.maxCanvasCssHeight), 2048, 16384);
   s2.undoLimit = clamp(Number(s2.undoLimit), 1, 50);
+  {
+    const rawPalm = Number(raw?.palmRejectMs);
+    if (rawPalm === 700) s2.palmRejectMs = 220;
+  }
   s2.palmRejectMs = clamp(Number(s2.palmRejectMs), 0, 3e3);
   s2.toolbarXPct = clamp(Number(s2.toolbarXPct), 5, 95);
   s2.toolbarYPct = clamp(Number(s2.toolbarYPct), 5, 95);
@@ -2946,8 +2961,37 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     };
     c2.addEventListener("pointerdown", (ev) => {
       if (ev.pointerType === "pen") {
-        stopFling();
-        this.ensurePenChannelLive(ev);
+        if (this.flingRaf || this.panRaf || this.scrollTouchId != null) {
+          stopFling();
+          this.ensurePenChannelLive(ev);
+        } else {
+          this.gestures.preemptForPen(ev.pointerId);
+          if (this.engine.isStroking() && this.gestures.getActiveDrawId() === null) {
+            const changed = this.engine.end();
+            this.state = "ready";
+            if (changed) {
+              const finished = this.engine.takeLastFinished();
+              const dpr = window.devicePixelRatio || 1;
+              if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
+                this.engine.stampStrokeToCache(
+                  this.cacheCanvas,
+                  finished,
+                  this.cssW,
+                  this.cssH,
+                  dpr
+                );
+              } else if (changed) {
+                this.cacheValid = false;
+              }
+              this.markDirty();
+            }
+          }
+          if (this.state !== "ready" && this.state !== "stroking") this.state = "ready";
+          if (!this.gestures.navigateMode) {
+            this.canvas.classList.remove("is-pass-through");
+            this.canvas.style.pointerEvents = "auto";
+          }
+        }
       } else if (this.state !== "ready" && this.state !== "stroking") {
         return;
       }
@@ -3276,30 +3320,38 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       case "draw-end": {
         const changed = this.engine.end();
         this.state = "ready";
-        if (changed) {
-          this.markDirty();
-          const finished = this.engine.takeLastFinished();
-          const dpr = window.devicePixelRatio || 1;
-          if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
-            this.engine.stampStrokeToCache(
-              this.cacheCanvas,
-              finished,
-              this.cssW,
-              this.cssH,
-              dpr
-            );
-          } else {
-            this.cacheValid = false;
-          }
-        }
-        if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
-        if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
-        this.requestRedraw();
+        this.gestures.clearActiveDraw();
         try {
           this.canvas.releasePointerCapture(ev.pointerId);
         } catch {
         }
-        if (this.remoteNewer && !this.dirty) void this.reloadFromDisk();
+        const finished = changed ? this.engine.takeLastFinished() : null;
+        const doStamp = () => {
+          if (changed) {
+            this.markDirty();
+            const dpr = window.devicePixelRatio || 1;
+            if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
+              this.engine.stampStrokeToCache(
+                this.cacheCanvas,
+                finished,
+                this.cssW,
+                this.cssH,
+                dpr
+              );
+            } else if (changed) {
+              this.cacheValid = false;
+            }
+          }
+          if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
+          if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
+          this.requestRedraw();
+          if (this.remoteNewer && !this.dirty) void this.reloadFromDisk();
+        };
+        if (!finished || finished.points.length < 120) {
+          doStamp();
+        } else {
+          requestAnimationFrame(doStamp);
+        }
         return;
       }
     }
@@ -3380,7 +3432,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       snapshotAt: Date.now()
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.5.2";
+    this.doc.meta.appVersion = "0.5.3";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new import_obsidian2.Notice("PyoInk: remote ink changed \u2014 saving local will overwrite");

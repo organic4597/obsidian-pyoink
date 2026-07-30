@@ -1676,8 +1676,40 @@ export class PyoInkView extends ItemView {
 
     c.addEventListener("pointerdown", (ev) => {
       if (ev.pointerType === "pen") {
-        stopFling();
-        this.ensurePenChannelLive(ev);
+        // Minimal hot path: kill fling + reclaim channel without heavy work
+        if (this.flingRaf || this.panRaf || this.scrollTouchId != null) {
+          stopFling();
+          this.ensurePenChannelLive(ev);
+        } else {
+          // Still clear finger junk cheaply so pen never waits on palm lock
+          this.gestures.preemptForPen(ev.pointerId);
+          if (this.engine.isStroking() && this.gestures.getActiveDrawId() === null) {
+            // Orphan mid-stroke from missed up — commit instantly, no full rebuild
+            const changed = this.engine.end();
+            this.state = "ready";
+            if (changed) {
+              const finished = this.engine.takeLastFinished();
+              const dpr = window.devicePixelRatio || 1;
+              if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
+                this.engine.stampStrokeToCache(
+                  this.cacheCanvas,
+                  finished,
+                  this.cssW,
+                  this.cssH,
+                  dpr,
+                );
+              } else if (changed) {
+                this.cacheValid = false;
+              }
+              this.markDirty();
+            }
+          }
+          if (this.state !== "ready" && this.state !== "stroking") this.state = "ready";
+          if (!this.gestures.navigateMode) {
+            this.canvas.classList.remove("is-pass-through");
+            this.canvas.style.pointerEvents = "auto";
+          }
+        }
       } else if (this.state !== "ready" && this.state !== "stroking") {
         return;
       }
@@ -2077,35 +2109,45 @@ export class PyoInkView extends ItemView {
         return;
       }
       case "draw-end": {
+        // Free the pen channel FIRST so the next tip-down is never blocked
+        // by stamp/cache/UI work from this lift.
         const changed = this.engine.end();
         this.state = "ready";
-        if (changed) {
-          this.markDirty();
-          // Fast path: stamp finished stroke onto cache instead of full rebuild
-          const finished = this.engine.takeLastFinished();
-          const dpr = window.devicePixelRatio || 1;
-          if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
-            this.engine.stampStrokeToCache(
-              this.cacheCanvas,
-              finished,
-              this.cssW,
-              this.cssH,
-              dpr,
-            );
-          } else {
-            this.cacheValid = false;
-          }
-        }
-        // Avoid full toolbar rebuild every stroke (was lag after each lift)
-        if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
-        if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
-        this.requestRedraw();
+        this.gestures.clearActiveDraw();
         try {
           this.canvas.releasePointerCapture(ev.pointerId);
         } catch {
           /* */
         }
-        if (this.remoteNewer && !this.dirty) void this.reloadFromDisk();
+
+        const finished = changed ? this.engine.takeLastFinished() : null;
+        const doStamp = () => {
+          if (changed) {
+            this.markDirty();
+            const dpr = window.devicePixelRatio || 1;
+            if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
+              this.engine.stampStrokeToCache(
+                this.cacheCanvas,
+                finished,
+                this.cssW,
+                this.cssH,
+                dpr,
+              );
+            } else if (changed) {
+              this.cacheValid = false;
+            }
+          }
+          if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
+          if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
+          this.requestRedraw();
+          if (this.remoteNewer && !this.dirty) void this.reloadFromDisk();
+        };
+        // Short strokes: stamp sync (cheap). Long strokes: next frame so re-down is instant.
+        if (!finished || finished.points.length < 120) {
+          doStamp();
+        } else {
+          requestAnimationFrame(doStamp);
+        }
         return;
       }
     }
@@ -2196,7 +2238,7 @@ export class PyoInkView extends ItemView {
       snapshotAt: Date.now(),
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.5.2";
+    this.doc.meta.appVersion = "0.5.3";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new Notice("PyoInk: remote ink changed — saving local will overwrite");

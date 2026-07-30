@@ -248,18 +248,22 @@ export class GestureRouter {
     this.movedPx = 0;
 
     if (ev.pointerType === "pen") {
-      // Contact only: buttons > 0. Pressure-only is unreliable (hover).
-      const contacting = ev.buttons > 0;
+      // Contact: buttons>0 preferred. Also accept light pressure — some iPad
+      // frames arrive with buttons still 0 on the first contact event, which
+      // used to ignore the stroke start and feel like lift→re-down lag.
+      const pr = typeof ev.pressure === "number" ? ev.pressure : 0;
+      const contacting = ev.buttons > 0 || pr > 0.02;
       if (!contacting) {
-        // Hover / pre-contact — do not start ink
+        // True hover / pre-contact — do not start ink
         this.penDownIds.delete(ev.pointerId);
         this.lastPenAt = performance.now();
         return { type: "ignore" };
       }
       this.penDownIds.clear();
       this.penDownIds.add(ev.pointerId);
-      // Fresh stroke: drop any stale draw lock from previous lift race
-      if (this.activeDrawId !== null && this.activeDrawId !== ev.pointerId) {
+      // Fresh stroke: drop ANY stale draw lock (same or different id)
+      // so lift→re-down never waits on a stuck activeDrawId.
+      if (this.activeDrawId !== null) {
         this.clearActiveDraw();
       }
       // Clear touch-only junk lightly
@@ -269,6 +273,7 @@ export class GestureRouter {
       this.pinch = null;
       this.lastPenAt = performance.now();
       this.penDownAt = performance.now();
+      this.lastPenTapAt = 0; // never hold tip-tap memory across real strokes
     }
 
     if (ev.pointerType === "touch") {
@@ -411,10 +416,10 @@ export class GestureRouter {
         sPen.enablePencilDoubleTap === true ||
         (sPen.pencilSingleTapAction && sPen.pencilSingleTapAction !== "ink");
 
-      if (tipTap && wasDrawing && tipTapEnabled && performance.now() - this.lastShortcutAt > 50) {
+      if (tipTap && wasDrawing && tipTapEnabled && performance.now() - this.lastShortcutAt > 40) {
         const now = performance.now();
-        // Double-tap: very short gap (default ~220ms) — feels snappy, not sticky
-        const dblWindow = 220;
+        // Double-tap gap ~1/3 of old 220ms — less hold-back after tip lifts
+        const dblWindow = 80;
         if (
           sPen.enablePencilDoubleTap === true &&
           this.lastPenTapAt > 0 &&
