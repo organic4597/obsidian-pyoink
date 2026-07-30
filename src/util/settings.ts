@@ -234,6 +234,14 @@ export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined
   }
   // Prefer off: handwriting lifts were misread as tip double-taps
   if (s.enablePencilDoubleTap === undefined) s.enablePencilDoubleTap = false;
+  // 0.3.2 reliability: tip double-tap still unsafe during real writing — keep OFF.
+  // Power users can re-enable in Settings after update (value persists once they toggle).
+  // Force-off when migrating from builds that defaulted true without user intent:
+  if (raw && (raw as Partial<PyoInkSettings>).enablePencilDoubleTap === true) {
+    // Keep true only if pencilDoubleTapAction was customized from default? Still risky.
+    // Hard force off for 0.3.2.
+    s.enablePencilDoubleTap = false;
+  }
   s.pencilDoubleTapAction = asFingerAction(
     s.pencilDoubleTapAction,
     "cycle_tool",

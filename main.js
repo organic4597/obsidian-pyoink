@@ -1449,6 +1449,9 @@ function sanitizeSettings(raw) {
     s2.enablePencilDoubleTap = !!s2.enablePencilDoubleTapProbe;
   }
   if (s2.enablePencilDoubleTap === void 0) s2.enablePencilDoubleTap = false;
+  if (raw && raw.enablePencilDoubleTap === true) {
+    s2.enablePencilDoubleTap = false;
+  }
   s2.pencilDoubleTapAction = asFingerAction(
     s2.pencilDoubleTapAction,
     "cycle_tool"
