@@ -51,22 +51,27 @@
   box-sizing: border-box;
 }
 
-/* Inner preview: let theme drive line width, type scale, callouts, etc. */
-.pyoink-reading-host .markdown-preview-view {
+/* Inner preview: full-width host so sizer can center (no left snap) */
+.pyoink-reading-host .markdown-preview-view,
+.pyoink-reading-host .pyoink-preview {
   overflow: visible;
   background: transparent;
-  /* room for floating tool island */
-  padding-bottom: 7rem !important;
+  width: 100%;
+  box-sizing: border-box;
+  /* top padding set in JS (small) so text sits higher */
   min-height: 100%;
 }
 
 .pyoink-reading-host .markdown-preview-sizer {
   /* theme + is-readable-line-width → --file-line-width */
-  min-height: 40vh;
+  min-height: 30vh;
   padding-bottom: 2rem;
   max-width: var(--file-line-width, 700px);
-  margin-left: auto;
-  margin-right: auto;
+  width: 100%;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  /* pull content slightly up vs default reading pusher */
+  padding-top: 0;
 }
 
 /* Avoid forcing type styles — inherit app/theme fully */

@@ -232,19 +232,33 @@ export class PyoInkView extends ItemView {
         "is-readable-line-width",
         "allow-fold-headings",
         "allow-fold-lists",
+        "pyoink-preview",
       ].join(" "),
     });
-    // Match file margins used by the app when available
+    // Horizontal margins from theme; keep top small so text frame sits higher
     try {
-      const fm = getComputedStyle(document.body).getPropertyValue("--file-margins").trim();
-      if (fm) preview.style.setProperty("padding", fm);
+      const body = getComputedStyle(document.body);
+      const fm = body.getPropertyValue("--file-margins").trim();
+      // Prefer left/right from --file-margins when it's "V H" or "T H B"
+      let side = body.getPropertyValue("--size-4-8").trim() || "2rem";
+      if (fm) {
+        const parts = fm.split(/\s+/).filter(Boolean);
+        if (parts.length >= 2) side = parts[1];
+        else if (parts.length === 1) side = parts[0];
+      }
+      preview.style.paddingLeft = side;
+      preview.style.paddingRight = side;
     } catch {
-      /* theme default */
+      preview.style.paddingLeft = "2rem";
+      preview.style.paddingRight = "2rem";
     }
+    preview.style.paddingTop = "0.35rem";
+    preview.style.paddingBottom = "7rem";
 
     const sizer = preview.createDiv({
       cls: "markdown-preview-sizer markdown-preview-section",
     });
+    // Minimal pusher — don't push content down
     sizer.createDiv({
       cls: "markdown-preview-pusher",
       attr: { style: "width: 1px; height: 0.1px; margin-bottom: 0;" },
@@ -2020,10 +2034,11 @@ export class PyoInkView extends ItemView {
 
   private watchResize() {
     this.resizeObs = new ResizeObserver(() => {
+      if (this.engine.isStroking() || this.state === "stroking") return;
       this.resizeAndRedraw(false);
     });
-    this.resizeObs.observe(this.pageEl);
-    this.resizeObs.observe(this.noteEl);
+    // Observe scroll host for viewport changes only — not page (avoids feedback loop)
+    this.resizeObs.observe(this.scrollEl);
   }
 
   /** Embeds/callouts that load late can change height — remeasure ink layer. */
@@ -2032,19 +2047,29 @@ export class PyoInkView extends ItemView {
       this.contentMutObs.disconnect();
       this.contentMutObs = null;
     }
-    this.contentMutObs = new MutationObserver(() => {
+    this.contentMutObs = new MutationObserver((records) => {
+      // Ignore pure class toggles on chrome; care about structure / img src
+      const meaningful = records.some(
+        (r) =>
+          r.type === "childList" ||
+          (r.type === "attributes" &&
+            (r.attributeName === "src" ||
+              (r.target instanceof HTMLElement &&
+                r.target.tagName === "IMG"))),
+      );
+      if (!meaningful) return;
       if (this.layoutPassTimer) window.clearTimeout(this.layoutPassTimer);
       this.layoutPassTimer = window.setTimeout(() => {
         this.layoutPassTimer = null;
-        if (this.engine.isStroking()) return;
+        if (this.engine.isStroking() || this.state === "stroking") return;
         this.resizeAndRedraw(false);
-      }, 80);
+      }, 150);
     });
     this.contentMutObs.observe(this.noteEl, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ["style", "class", "src"],
+      attributeFilter: ["src"],
     });
   }
 
@@ -2069,30 +2094,41 @@ export class PyoInkView extends ItemView {
 
   private resizeAndRedraw(forceCache: boolean) {
     if (!this.file) return;
-    // Prefer preview sizer metrics (matches reading view column)
+    // Never reflow page geometry mid-stroke (was causing text to jump left)
+    if (
+      !forceCache &&
+      (this.engine.isStroking() || this.state === "stroking")
+    ) {
+      this.requestRedraw();
+      return;
+    }
+
     const sizer =
       this.noteEl.querySelector(".markdown-preview-sizer") as HTMLElement | null;
-    const measureEl = sizer || this.noteEl;
-    const contentW = Math.max(
-      measureEl.scrollWidth,
-      measureEl.clientWidth,
-      this.noteEl.scrollWidth,
-      this.scrollEl.clientWidth,
+    const viewportW = Math.max(1, this.scrollEl.clientWidth);
+    const viewportH = Math.max(1, this.scrollEl.clientHeight);
+
+    // Natural column size from sizer only (not mixed with viewport — that caused
+    // width flip-flops and left-jump when centering reflowed).
+    const naturalW = Math.max(
+      sizer?.scrollWidth || 0,
+      sizer?.clientWidth || 0,
       1,
     );
-    let contentH = Math.max(
-      measureEl.scrollHeight,
-      measureEl.clientHeight,
-      this.noteEl.scrollHeight,
-      this.scrollEl.clientHeight,
+    let naturalH = Math.max(
+      sizer?.scrollHeight || 0,
+      sizer?.clientHeight || 0,
+      this.noteEl.scrollHeight || 0,
       1,
     );
-    if (contentH > this.plugin.settings.maxCanvasCssHeight) {
-      contentH = this.plugin.settings.maxCanvasCssHeight;
-      inkLog("E_CANVAS_MAX", contentH);
+    if (naturalH > this.plugin.settings.maxCanvasCssHeight) {
+      naturalH = this.plugin.settings.maxCanvasCssHeight;
+      inkLog("E_CANVAS_MAX", naturalH);
     }
-    let w = contentW;
-    let h = contentH;
+
+    // Page is always at least viewport-wide so readable column can stay centered
+    let w = Math.max(viewportW, naturalW);
+    let h = Math.max(viewportH, naturalH + 24);
     const dpr = window.devicePixelRatio || 1;
     if (w * h * dpr * dpr > 16_000_000) {
       const scale = Math.sqrt(16_000_000 / (w * h * dpr * dpr));
@@ -2100,10 +2136,28 @@ export class PyoInkView extends ItemView {
       h = Math.floor(h * scale);
       inkLog("E_CANVAS_MAX", { w, h });
     }
+
+    // Skip buffer recreate for tiny jitter (prevents flash / teleport)
+    if (
+      !forceCache &&
+      this.cssW > 0 &&
+      Math.abs(w - this.cssW) < 3 &&
+      Math.abs(h - this.cssH) < 12
+    ) {
+      this.requestRedraw();
+      return;
+    }
+
+    const prevScrollLeft = this.scrollEl.scrollLeft;
+    const prevScrollTop = this.scrollEl.scrollTop;
+    const prevW = this.cssW || w;
+
     this.cssW = w;
     this.cssH = h;
     this.pageEl.style.width = `${w}px`;
     this.pageEl.style.minHeight = `${h}px`;
+    this.pageEl.style.marginLeft = "0";
+    this.pageEl.style.marginRight = "0";
     this.applyPageZoom();
 
     this.canvas.width = Math.max(1, Math.floor(w * dpr));
@@ -2111,13 +2165,24 @@ export class PyoInkView extends ItemView {
     this.canvas.style.width = `${w}px`;
     this.canvas.style.height = `${h}px`;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    // transparent clear
     this.ctx.clearRect(0, 0, w, h);
 
     if (forceCache || !this.cacheValid) {
       if (this.cacheCanvas) this.engine.rebuildCache(this.cacheCanvas, w, h, dpr);
       this.cacheValid = true;
     }
+
+    // Preserve scroll when width stabilizes (avoid left snap)
+    if (prevW > 0 && Math.abs(w - prevW) > 2) {
+      // keep visual center if width changed
+      const mid = prevScrollLeft + viewportW / 2;
+      const ratio = mid / Math.max(1, prevW);
+      this.scrollEl.scrollLeft = Math.max(0, ratio * w - viewportW / 2);
+    } else {
+      this.scrollEl.scrollLeft = prevScrollLeft;
+    }
+    this.scrollEl.scrollTop = prevScrollTop;
+
     this.requestRedraw();
   }
 

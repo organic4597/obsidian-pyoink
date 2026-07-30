@@ -1656,14 +1656,27 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         "node-insert-event",
         "is-readable-line-width",
         "allow-fold-headings",
-        "allow-fold-lists"
+        "allow-fold-lists",
+        "pyoink-preview"
       ].join(" ")
     });
     try {
-      const fm = getComputedStyle(document.body).getPropertyValue("--file-margins").trim();
-      if (fm) preview.style.setProperty("padding", fm);
+      const body = getComputedStyle(document.body);
+      const fm = body.getPropertyValue("--file-margins").trim();
+      let side = body.getPropertyValue("--size-4-8").trim() || "2rem";
+      if (fm) {
+        const parts = fm.split(/\s+/).filter(Boolean);
+        if (parts.length >= 2) side = parts[1];
+        else if (parts.length === 1) side = parts[0];
+      }
+      preview.style.paddingLeft = side;
+      preview.style.paddingRight = side;
     } catch {
+      preview.style.paddingLeft = "2rem";
+      preview.style.paddingRight = "2rem";
     }
+    preview.style.paddingTop = "0.35rem";
+    preview.style.paddingBottom = "7rem";
     const sizer = preview.createDiv({
       cls: "markdown-preview-sizer markdown-preview-section"
     });
@@ -3187,10 +3200,10 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   watchResize() {
     this.resizeObs = new ResizeObserver(() => {
+      if (this.engine.isStroking() || this.state === "stroking") return;
       this.resizeAndRedraw(false);
     });
-    this.resizeObs.observe(this.pageEl);
-    this.resizeObs.observe(this.noteEl);
+    this.resizeObs.observe(this.scrollEl);
   }
   /** Embeds/callouts that load late can change height — remeasure ink layer. */
   watchContentMutations() {
@@ -3198,19 +3211,23 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       this.contentMutObs.disconnect();
       this.contentMutObs = null;
     }
-    this.contentMutObs = new MutationObserver(() => {
+    this.contentMutObs = new MutationObserver((records) => {
+      const meaningful = records.some(
+        (r2) => r2.type === "childList" || r2.type === "attributes" && (r2.attributeName === "src" || r2.target instanceof HTMLElement && r2.target.tagName === "IMG")
+      );
+      if (!meaningful) return;
       if (this.layoutPassTimer) window.clearTimeout(this.layoutPassTimer);
       this.layoutPassTimer = window.setTimeout(() => {
         this.layoutPassTimer = null;
-        if (this.engine.isStroking()) return;
+        if (this.engine.isStroking() || this.state === "stroking") return;
         this.resizeAndRedraw(false);
-      }, 80);
+      }, 150);
     });
     this.contentMutObs.observe(this.noteEl, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ["style", "class", "src"]
+      attributeFilter: ["src"]
     });
   }
   teardownWatchers() {
@@ -3233,28 +3250,30 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   resizeAndRedraw(forceCache) {
     if (!this.file) return;
-    const sizer = this.noteEl.querySelector(".markdown-preview-sizer");
-    const measureEl = sizer || this.noteEl;
-    const contentW = Math.max(
-      measureEl.scrollWidth,
-      measureEl.clientWidth,
-      this.noteEl.scrollWidth,
-      this.scrollEl.clientWidth,
-      1
-    );
-    let contentH = Math.max(
-      measureEl.scrollHeight,
-      measureEl.clientHeight,
-      this.noteEl.scrollHeight,
-      this.scrollEl.clientHeight,
-      1
-    );
-    if (contentH > this.plugin.settings.maxCanvasCssHeight) {
-      contentH = this.plugin.settings.maxCanvasCssHeight;
-      inkLog("E_CANVAS_MAX", contentH);
+    if (!forceCache && (this.engine.isStroking() || this.state === "stroking")) {
+      this.requestRedraw();
+      return;
     }
-    let w2 = contentW;
-    let h2 = contentH;
+    const sizer = this.noteEl.querySelector(".markdown-preview-sizer");
+    const viewportW = Math.max(1, this.scrollEl.clientWidth);
+    const viewportH = Math.max(1, this.scrollEl.clientHeight);
+    const naturalW = Math.max(
+      sizer?.scrollWidth || 0,
+      sizer?.clientWidth || 0,
+      1
+    );
+    let naturalH = Math.max(
+      sizer?.scrollHeight || 0,
+      sizer?.clientHeight || 0,
+      this.noteEl.scrollHeight || 0,
+      1
+    );
+    if (naturalH > this.plugin.settings.maxCanvasCssHeight) {
+      naturalH = this.plugin.settings.maxCanvasCssHeight;
+      inkLog("E_CANVAS_MAX", naturalH);
+    }
+    let w2 = Math.max(viewportW, naturalW);
+    let h2 = Math.max(viewportH, naturalH + 24);
     const dpr = window.devicePixelRatio || 1;
     if (w2 * h2 * dpr * dpr > 16e6) {
       const scale = Math.sqrt(16e6 / (w2 * h2 * dpr * dpr));
@@ -3262,10 +3281,19 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       h2 = Math.floor(h2 * scale);
       inkLog("E_CANVAS_MAX", { w: w2, h: h2 });
     }
+    if (!forceCache && this.cssW > 0 && Math.abs(w2 - this.cssW) < 3 && Math.abs(h2 - this.cssH) < 12) {
+      this.requestRedraw();
+      return;
+    }
+    const prevScrollLeft = this.scrollEl.scrollLeft;
+    const prevScrollTop = this.scrollEl.scrollTop;
+    const prevW = this.cssW || w2;
     this.cssW = w2;
     this.cssH = h2;
     this.pageEl.style.width = `${w2}px`;
     this.pageEl.style.minHeight = `${h2}px`;
+    this.pageEl.style.marginLeft = "0";
+    this.pageEl.style.marginRight = "0";
     this.applyPageZoom();
     this.canvas.width = Math.max(1, Math.floor(w2 * dpr));
     this.canvas.height = Math.max(1, Math.floor(h2 * dpr));
@@ -3277,6 +3305,14 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       if (this.cacheCanvas) this.engine.rebuildCache(this.cacheCanvas, w2, h2, dpr);
       this.cacheValid = true;
     }
+    if (prevW > 0 && Math.abs(w2 - prevW) > 2) {
+      const mid = prevScrollLeft + viewportW / 2;
+      const ratio = mid / Math.max(1, prevW);
+      this.scrollEl.scrollLeft = Math.max(0, ratio * w2 - viewportW / 2);
+    } else {
+      this.scrollEl.scrollLeft = prevScrollLeft;
+    }
+    this.scrollEl.scrollTop = prevScrollTop;
     this.requestRedraw();
   }
   requestRedraw() {
