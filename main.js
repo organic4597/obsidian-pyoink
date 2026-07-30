@@ -241,29 +241,68 @@ function toPfInput(points) {
   }
   return out;
 }
+function pathLen(input) {
+  let L2 = 0;
+  for (let i2 = 1; i2 < input.length; i2++) {
+    const dx = input[i2][0] - input[i2 - 1][0];
+    const dy = input[i2][1] - input[i2 - 1][1];
+    L2 += Math.hypot(dx, dy);
+  }
+  return L2;
+}
+function capsulePath(input, size) {
+  const path = new Path2D();
+  const r2 = Math.max(0.6, size * 0.48);
+  if (input.length === 1) {
+    path.arc(input[0][0], input[0][1], r2, 0, Math.PI * 2);
+    return path;
+  }
+  for (let i2 = 0; i2 < input.length; i2++) {
+    path.moveTo(input[i2][0] + r2, input[i2][1]);
+    path.arc(input[i2][0], input[i2][1], r2, 0, Math.PI * 2);
+  }
+  for (let i2 = 1; i2 < input.length; i2++) {
+    const x0 = input[i2 - 1][0];
+    const y0 = input[i2 - 1][1];
+    const x1 = input[i2][0];
+    const y1 = input[i2][1];
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len * r2;
+    const ny = dx / len * r2;
+    path.moveTo(x0 + nx, y0 + ny);
+    path.lineTo(x1 + nx, y1 + ny);
+    path.lineTo(x1 - nx, y1 - ny);
+    path.lineTo(x0 - nx, y0 - ny);
+    path.closePath();
+  }
+  return path;
+}
 function buildStrokePath(points, style, settings, opts) {
   const input = toPfInput(points);
   if (input.length === 0) {
     inkLog("E_PF_EMPTY");
     return null;
   }
-  if (input.length === 1) {
-    const path = new Path2D();
-    const r2 = Math.max(0.5, style.size * (input[0][2] ?? 0.5) * 0.5);
-    path.arc(input[0][0], input[0][1], r2, 0, Math.PI * 2);
-    return path;
-  }
   const size = Math.max(0.5, style.size);
+  const len = pathLen(input);
+  if (input.length <= 6 || len < size * 3.5) {
+    return capsulePath(input, size);
+  }
   try {
+    const streamline = opts.last ? settings.pfStreamline : Math.min(settings.pfStreamline, 0.45);
     const outline = R(input, {
       size,
       thinning: style.tool === "highlighter" ? 0.05 : settings.pfThinning,
-      smoothing: settings.pfSmoothing,
-      streamline: settings.pfStreamline,
+      smoothing: Math.min(settings.pfSmoothing, opts.last ? settings.pfSmoothing : 0.5),
+      streamline,
       simulatePressure: opts.simulatePressure,
       last: opts.last
     });
-    if (!outline || outline.length < 2) return null;
+    if (!outline || outline.length < 2) {
+      return capsulePath(input, size);
+    }
     const stride = outline.length > 2e4 ? Math.ceil(outline.length / 1e4) : 1;
     const path = new Path2D();
     path.moveTo(outline[0][0], outline[0][1]);
@@ -276,10 +315,7 @@ function buildStrokePath(points, style, settings, opts) {
     return path;
   } catch (e2) {
     inkLog("E_PF_THROW", e2);
-    const path = new Path2D();
-    path.moveTo(input[0][0], input[0][1]);
-    for (let i2 = 1; i2 < input.length; i2++) path.lineTo(input[i2][0], input[i2][1]);
-    return path;
+    return capsulePath(input, size);
   }
 }
 function fillStrokePath(ctx, path, style, fallbackPolyline) {
@@ -1123,7 +1159,7 @@ function emptyDoc(source) {
       createdAt: now,
       updatedAt: now,
       appId: "pyoink",
-      appVersion: "0.5.6"
+      appVersion: "0.5.7"
     }
   };
 }
@@ -1498,10 +1534,12 @@ var DEFAULT_SETTINGS = {
   simulatePressureFallback: true,
   pressureGain: 1.2,
   /** Outline smoothing (perfect-freehand). Higher = smoother stroke edges. */
-  pfSmoothing: 0.68,
-  pfThinning: 0.5,
-  /** Input streamline — averages points while drawing (GoodNotes-like stabilise). */
-  pfStreamline: 0.72,
+  pfSmoothing: 0.55,
+  pfThinning: 0.45,
+  /**
+   * Input streamline. Too high (0.7+) eats short Hangul jamo (ㅣ/ㅡ) — keep moderate.
+   */
+  pfStreamline: 0.42,
   debounceMs: 12e3,
   maxCanvasCssHeight: 8192,
   undoLimit: 50,
@@ -1527,11 +1565,13 @@ function sanitizeSettings(raw) {
   );
   s2.eraserWidth = snapWidth("eraser", clamp(Number(s2.eraserWidth), 8, 120));
   s2.pressureGain = clamp(Number(s2.pressureGain), 0.3, 3);
-  const rawSm = Number(raw?.pfSmoothing);
-  const rawSl = Number(raw?.pfStreamline);
-  if (rawSm === 0.5 && rawSl === 0.5) {
-    s2.pfSmoothing = 0.68;
-    s2.pfStreamline = 0.72;
+  {
+    const rawSm = Number(raw?.pfSmoothing);
+    const rawSl = Number(raw?.pfStreamline);
+    if (rawSm === 0.5 && rawSl === 0.5 || rawSl === 0.72 || rawSl === 0.68) {
+      s2.pfSmoothing = 0.55;
+      s2.pfStreamline = 0.42;
+    }
   }
   s2.pfSmoothing = clamp(Number(s2.pfSmoothing), 0, 0.95);
   s2.pfThinning = clamp(Number(s2.pfThinning), -0.99, 0.99);
@@ -2913,6 +2953,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   bindPointer() {
     const c2 = this.canvas;
+    const penSurface = this.rootEl;
     const stopFling = () => {
       if (this.flingRaf) {
         cancelAnimationFrame(this.flingRaf);
@@ -3015,8 +3056,9 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     };
     const penContact = (ev) => {
       const pr = typeof ev.pressure === "number" ? ev.pressure : 0;
-      return ev.buttons > 0 || pr > 0.01;
+      return ev.buttons > 0 || pr > 5e-3;
     };
+    const canvasRect = () => c2.getBoundingClientRect();
     const startPenInk = (ev, rect) => {
       if (this.gestures.navigateMode) return false;
       if (this.scrollTouchId != null || this.flingRaf || this.panRaf || this.canvas.classList.contains("is-pass-through")) {
@@ -3025,25 +3067,96 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       } else {
         this.gestures.preemptForPen(ev.pointerId);
       }
-      if (this.engine.isStroking() && this.gestures.getActiveDrawId() !== ev.pointerId) {
-        this.engine.end();
-        this.cacheValid = false;
+      if (this.engine.isStroking()) {
+        const finished = (() => {
+          const changed = this.engine.end();
+          return changed ? this.engine.takeLastFinished() : null;
+        })();
+        if (finished) {
+          const dpr = window.devicePixelRatio || 1;
+          if (this.cacheCanvas && this.cacheValid && this.cssW > 0) {
+            this.engine.stampStrokeToCache(
+              this.cacheCanvas,
+              finished,
+              this.cssW,
+              this.cssH,
+              dpr
+            );
+          } else {
+            this.cacheValid = false;
+          }
+          this.markDirty();
+        }
+      }
+      try {
+        c2.setPointerCapture(ev.pointerId);
+      } catch {
       }
       const action = this.gestures.forcePenDrawStart(ev.pointerId);
       this.handleGesture(action, ev, rect);
       ev.preventDefault();
       return true;
     };
-    c2.addEventListener("pointerdown", (ev) => {
-      if (ev.pointerType === "pen") {
-        const rect2 = c2.getBoundingClientRect();
-        if (penContact(ev)) {
-          startPenInk(ev, rect2);
-          return;
-        }
+    const onPenDownCapture = (ev) => {
+      if (ev.pointerType !== "pen") return;
+      if (!penSurface.contains(ev.target) && ev.target !== c2) return;
+      if (this.gestures.navigateMode) return;
+      const rect = canvasRect();
+      if (penContact(ev)) {
+        startPenInk(ev, rect);
+        ev.stopPropagation();
+      } else {
         this.gestures.preemptForPen(ev.pointerId);
-        return;
       }
+    };
+    const onPenMoveCapture = (ev) => {
+      if (ev.pointerType !== "pen") return;
+      if (!this.gestures.isDrawing() && !this.engine.getActive()) {
+        if (!penContact(ev)) return;
+        if (!penSurface.contains(ev.target) && ev.target !== c2) return;
+        startPenInk(ev, canvasRect());
+      }
+      if (this.gestures.isDrawing() || this.engine.getActive()) {
+        if (ev.target === c2 || c2.contains(ev.target)) return;
+        if (this.gestures.getActiveDrawId() === ev.pointerId || penContact(ev)) {
+          this.gestures.stickyPenContact(ev.pointerId);
+          const rect = canvasRect();
+          if (!this.engine.getActive() && penContact(ev)) {
+            startPenInk(ev, rect);
+          }
+          const samples = this.gestures.collectSamples(ev, rect);
+          this.handleGesture(
+            { type: "draw-move", pointerId: ev.pointerId, samples },
+            ev,
+            rect
+          );
+          ev.preventDefault();
+        }
+      }
+    };
+    const onPenUpCapture = (ev) => {
+      if (ev.pointerType !== "pen") return;
+      if (!this.engine.isStroking() && !this.gestures.isDrawing()) return;
+      const rect = canvasRect();
+      if (this.gestures.getActiveDrawId() !== ev.pointerId) {
+        this.gestures.bindPenForEnd(ev.pointerId);
+      }
+      const action = this.gestures.onUp(ev, rect);
+      if (action.type === "ignore" || this.engine.isStroking()) {
+        this.handleGesture({ type: "draw-end", pointerId: ev.pointerId }, ev, rect);
+      } else {
+        this.handleGesture(action, ev, rect);
+        if (this.engine.isStroking()) {
+          this.handleGesture({ type: "draw-end", pointerId: ev.pointerId }, ev, rect);
+        }
+      }
+    };
+    penSurface.addEventListener("pointerdown", onPenDownCapture, { capture: true });
+    penSurface.addEventListener("pointermove", onPenMoveCapture, { capture: true });
+    penSurface.addEventListener("pointerup", onPenUpCapture, { capture: true });
+    penSurface.addEventListener("pointercancel", onPenUpCapture, { capture: true });
+    c2.addEventListener("pointerdown", (ev) => {
+      if (ev.pointerType === "pen") return;
       if (this.state !== "ready" && this.state !== "stroking") {
         return;
       }
@@ -3445,45 +3558,26 @@ var PyoInkView = class extends import_obsidian2.ItemView {
           this.canvas.releasePointerCapture(ev.pointerId);
         } catch {
         }
-        const finished = changed ? this.engine.takeLastFinished() : null;
-        requestAnimationFrame(() => {
-          if (this.state === "stroking" || this.engine.isStroking()) {
-            if (changed) {
-              this.markDirty();
-              if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
-                this.engine.stampStrokeToCache(
-                  this.cacheCanvas,
-                  finished,
-                  this.cssW,
-                  this.cssH,
-                  window.devicePixelRatio || 1
-                );
-              } else if (changed) {
-                this.cacheValid = false;
-              }
-            }
-            return;
+        if (changed) {
+          this.markDirty();
+          const finished = this.engine.takeLastFinished();
+          const dpr = window.devicePixelRatio || 1;
+          if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
+            this.engine.stampStrokeToCache(
+              this.cacheCanvas,
+              finished,
+              this.cssW,
+              this.cssH,
+              dpr
+            );
+          } else {
+            this.cacheValid = false;
           }
-          if (changed) {
-            this.markDirty();
-            const dpr = window.devicePixelRatio || 1;
-            if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
-              this.engine.stampStrokeToCache(
-                this.cacheCanvas,
-                finished,
-                this.cssW,
-                this.cssH,
-                dpr
-              );
-            } else if (changed) {
-              this.cacheValid = false;
-            }
-          }
-          if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
-          if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
-          this.requestRedraw();
-          if (this.remoteNewer && !this.dirty) void this.reloadFromDisk();
-        });
+        }
+        if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
+        if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
+        this.requestRedraw();
+        if (this.remoteNewer && !this.dirty) void this.reloadFromDisk();
         return;
       }
     }
@@ -3564,7 +3658,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       snapshotAt: Date.now()
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.5.6";
+    this.doc.meta.appVersion = "0.5.7";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new import_obsidian2.Notice("PyoInk: remote ink changed \u2014 saving local will overwrite");

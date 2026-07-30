@@ -1570,6 +1570,9 @@ export class PyoInkView extends ItemView {
 
   private bindPointer() {
     const c = this.canvas;
+    // Also listen on the root (capture) so rapid Hangul jamo never miss
+    // pointerdown when canvas capture was released between short strokes.
+    const penSurface: HTMLElement = this.rootEl;
 
     const stopFling = () => {
       if (this.flingRaf) {
@@ -1688,8 +1691,11 @@ export class PyoInkView extends ItemView {
     /** Pencil fast path: never lose a stroke when writing quickly. */
     const penContact = (ev: PointerEvent) => {
       const pr = typeof ev.pressure === "number" ? ev.pressure : 0;
-      return ev.buttons > 0 || pr > 0.01;
+      // Hangul jamo: very light tip taps still count
+      return ev.buttons > 0 || pr > 0.005;
     };
+
+    const canvasRect = () => c.getBoundingClientRect();
 
     const startPenInk = (ev: PointerEvent, rect: DOMRect) => {
       if (this.gestures.navigateMode) return false;
@@ -1704,30 +1710,108 @@ export class PyoInkView extends ItemView {
       } else {
         this.gestures.preemptForPen(ev.pointerId);
       }
-      // If a previous stroke is still open, commit it then start fresh
-      if (this.engine.isStroking() && this.gestures.getActiveDrawId() !== ev.pointerId) {
-        this.engine.end();
-        this.cacheValid = false;
+      // Always commit previous open stroke (same pointerId is normal for Pencil)
+      if (this.engine.isStroking()) {
+        const finished = (() => {
+          const changed = this.engine.end();
+          return changed ? this.engine.takeLastFinished() : null;
+        })();
+        if (finished) {
+          // Stamp immediately — short jamo must land before the next tip-down
+          const dpr = window.devicePixelRatio || 1;
+          if (this.cacheCanvas && this.cacheValid && this.cssW > 0) {
+            this.engine.stampStrokeToCache(
+              this.cacheCanvas,
+              finished,
+              this.cssW,
+              this.cssH,
+              dpr,
+            );
+          } else {
+            this.cacheValid = false;
+          }
+          this.markDirty();
+        }
+      }
+      try {
+        c.setPointerCapture(ev.pointerId);
+      } catch {
+        /* */
       }
       const action = this.gestures.forcePenDrawStart(ev.pointerId);
       this.handleGesture(action, ev, rect);
-      // Also sample this event as the first point is already in beginPen
       ev.preventDefault();
       return true;
     };
 
-    c.addEventListener("pointerdown", (ev) => {
-      // ——— Pencil: dedicated path (bypass scroll / palm / ignore races) ———
-      if (ev.pointerType === "pen") {
-        const rect = c.getBoundingClientRect();
-        if (penContact(ev)) {
-          startPenInk(ev, rect);
-          return;
-        }
-        // Hover only — wait for contact move
+    // Pen on root capture: catches tip-down even when canvas lost capture
+    // between short Hangul strokes (ㅇ → ㅣ → ㅡ).
+    const onPenDownCapture = (ev: PointerEvent) => {
+      if (ev.pointerType !== "pen") return;
+      if (!penSurface.contains(ev.target as Node) && ev.target !== c) return;
+      if (this.gestures.navigateMode) return;
+      const rect = canvasRect();
+      if (penContact(ev)) {
+        startPenInk(ev, rect);
+        ev.stopPropagation();
+      } else {
         this.gestures.preemptForPen(ev.pointerId);
-        return;
       }
+    };
+    const onPenMoveCapture = (ev: PointerEvent) => {
+      if (ev.pointerType !== "pen") return;
+      // Only handle if this view owns the pen or contact is over our surface
+      if (!this.gestures.isDrawing() && !this.engine.getActive()) {
+        if (!penContact(ev)) return;
+        if (!penSurface.contains(ev.target as Node) && ev.target !== c) return;
+        startPenInk(ev, canvasRect());
+      }
+      // Actual move handling is on canvas; if we're drawing, ensure samples land
+      if (this.gestures.isDrawing() || this.engine.getActive()) {
+        if (ev.target === c || c.contains(ev.target as Node)) return; // canvas handler runs
+        // Events retargeted off-canvas while captured — feed manually
+        if (this.gestures.getActiveDrawId() === ev.pointerId || penContact(ev)) {
+          this.gestures.stickyPenContact(ev.pointerId);
+          const rect = canvasRect();
+          if (!this.engine.getActive() && penContact(ev)) {
+            startPenInk(ev, rect);
+          }
+          const samples = this.gestures.collectSamples(ev, rect);
+          this.handleGesture(
+            { type: "draw-move", pointerId: ev.pointerId, samples },
+            ev,
+            rect,
+          );
+          ev.preventDefault();
+        }
+      }
+    };
+    const onPenUpCapture = (ev: PointerEvent) => {
+      if (ev.pointerType !== "pen") return;
+      if (!this.engine.isStroking() && !this.gestures.isDrawing()) return;
+      const rect = canvasRect();
+      if (this.gestures.getActiveDrawId() !== ev.pointerId) {
+        this.gestures.bindPenForEnd(ev.pointerId);
+      }
+      const action = this.gestures.onUp(ev, rect);
+      if (action.type === "ignore" || this.engine.isStroking()) {
+        this.handleGesture({ type: "draw-end", pointerId: ev.pointerId }, ev, rect);
+      } else {
+        this.handleGesture(action, ev, rect);
+        if (this.engine.isStroking()) {
+          this.handleGesture({ type: "draw-end", pointerId: ev.pointerId }, ev, rect);
+        }
+      }
+    };
+
+    penSurface.addEventListener("pointerdown", onPenDownCapture, { capture: true });
+    penSurface.addEventListener("pointermove", onPenMoveCapture, { capture: true });
+    penSurface.addEventListener("pointerup", onPenUpCapture, { capture: true });
+    penSurface.addEventListener("pointercancel", onPenUpCapture, { capture: true });
+
+    c.addEventListener("pointerdown", (ev) => {
+      // Pencil handled in root capture (avoids double-start)
+      if (ev.pointerType === "pen") return;
 
       if (this.state !== "ready" && this.state !== "stroking") {
         return;
@@ -2222,57 +2306,39 @@ export class PyoInkView extends ItemView {
         return;
       }
       case "draw-end": {
-        // Free pen channel immediately — no wait before next tip-down.
-        // Cache stamp / chrome always next frame so lift never blocks re-ink.
+        // Commit immediately (Hangul jamo are short — must stamp before next tip).
         const changed = this.engine.end();
         this.state = "ready";
         this.gestures.clearActiveDraw();
+        // Keep capture if possible so the next jamo's events stay on canvas;
+        // browser still releases on pointerup, but try not to force early release races.
         try {
+          // only release if not about to get another pen event — safe release
           this.canvas.releasePointerCapture(ev.pointerId);
         } catch {
           /* */
         }
 
-        const finished = changed ? this.engine.takeLastFinished() : null;
-        requestAnimationFrame(() => {
-          // Skip if user already started the next stroke (don't hitch mid-ink)
-          if (this.state === "stroking" || this.engine.isStroking()) {
-            if (changed) {
-              this.markDirty();
-              if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
-                this.engine.stampStrokeToCache(
-                  this.cacheCanvas,
-                  finished,
-                  this.cssW,
-                  this.cssH,
-                  window.devicePixelRatio || 1,
-                );
-              } else if (changed) {
-                this.cacheValid = false;
-              }
-            }
-            return;
+        if (changed) {
+          this.markDirty();
+          const finished = this.engine.takeLastFinished();
+          const dpr = window.devicePixelRatio || 1;
+          if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
+            this.engine.stampStrokeToCache(
+              this.cacheCanvas,
+              finished,
+              this.cssW,
+              this.cssH,
+              dpr,
+            );
+          } else {
+            this.cacheValid = false;
           }
-          if (changed) {
-            this.markDirty();
-            const dpr = window.devicePixelRatio || 1;
-            if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
-              this.engine.stampStrokeToCache(
-                this.cacheCanvas,
-                finished,
-                this.cssW,
-                this.cssH,
-                dpr,
-              );
-            } else if (changed) {
-              this.cacheValid = false;
-            }
-          }
-          if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
-          if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
-          this.requestRedraw();
-          if (this.remoteNewer && !this.dirty) void this.reloadFromDisk();
-        });
+        }
+        if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
+        if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
+        this.requestRedraw();
+        if (this.remoteNewer && !this.dirty) void this.reloadFromDisk();
         return;
       }
     }
@@ -2363,7 +2429,7 @@ export class PyoInkView extends ItemView {
       snapshotAt: Date.now(),
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.5.6";
+    this.doc.meta.appVersion = "0.5.7";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new Notice("PyoInk: remote ink changed — saving local will overwrite");

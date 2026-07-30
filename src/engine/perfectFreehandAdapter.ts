@@ -24,6 +24,52 @@ function toPfInput(points: PointTuple[]): number[][] {
   return out;
 }
 
+function pathLen(input: number[][]): number {
+  let L = 0;
+  for (let i = 1; i < input.length; i++) {
+    const dx = input[i][0] - input[i - 1][0];
+    const dy = input[i][1] - input[i - 1][1];
+    L += Math.hypot(dx, dy);
+  }
+  return L;
+}
+
+/**
+ * Reliable short-stroke rendering for Hangul jamo (ㅣ, ㅡ, dots).
+ * perfect-freehand + high streamline often returns an empty outline for 2–6
+ * point flicks, so those strokes vanish while longer ones (ㅇ) still show.
+ */
+function capsulePath(input: number[][], size: number): Path2D {
+  const path = new Path2D();
+  const r = Math.max(0.6, size * 0.48);
+  if (input.length === 1) {
+    path.arc(input[0][0], input[0][1], r, 0, Math.PI * 2);
+    return path;
+  }
+  // Rounded polyline via thick stroke simulation (filled stadiums between segments)
+  for (let i = 0; i < input.length; i++) {
+    path.moveTo(input[i][0] + r, input[i][1]);
+    path.arc(input[i][0], input[i][1], r, 0, Math.PI * 2);
+  }
+  for (let i = 1; i < input.length; i++) {
+    const x0 = input[i - 1][0];
+    const y0 = input[i - 1][1];
+    const x1 = input[i][0];
+    const y1 = input[i][1];
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = (-dy / len) * r;
+    const ny = (dx / len) * r;
+    path.moveTo(x0 + nx, y0 + ny);
+    path.lineTo(x1 + nx, y1 + ny);
+    path.lineTo(x1 - nx, y1 - ny);
+    path.lineTo(x0 - nx, y0 - ny);
+    path.closePath();
+  }
+  return path;
+}
+
 export function buildStrokePath(
   points: PointTuple[],
   style: StrokeStyle,
@@ -35,24 +81,34 @@ export function buildStrokePath(
     inkLog("E_PF_EMPTY");
     return null;
   }
-  if (input.length === 1) {
-    const path = new Path2D();
-    const r = Math.max(0.5, style.size * (input[0][2] ?? 0.5) * 0.5);
-    path.arc(input[0][0], input[0][1], r, 0, Math.PI * 2);
-    return path;
-  }
 
   const size = Math.max(0.5, style.size);
+  const len = pathLen(input);
+
+  // Hangul jamo / quick flicks: always use capsule (never invisible)
+  // ㅣ is often 2–8 samples and only a few CSS px long.
+  if (input.length <= 6 || len < size * 3.5) {
+    return capsulePath(input, size);
+  }
+
   try {
+    // Slightly less streamline on non-final frames keeps live ink visible;
+    // short strokes already handled above.
+    const streamline = opts.last
+      ? settings.pfStreamline
+      : Math.min(settings.pfStreamline, 0.45);
     const outline = getStroke(input, {
       size,
       thinning: style.tool === "highlighter" ? 0.05 : settings.pfThinning,
-      smoothing: settings.pfSmoothing,
-      streamline: settings.pfStreamline,
+      smoothing: Math.min(settings.pfSmoothing, opts.last ? settings.pfSmoothing : 0.5),
+      streamline,
       simulatePressure: opts.simulatePressure,
       last: opts.last,
     });
-    if (!outline || outline.length < 2) return null;
+    if (!outline || outline.length < 2) {
+      // PF failed (common on short/jagged input) — never drop the stroke
+      return capsulePath(input, size);
+    }
     const stride = outline.length > 20000 ? Math.ceil(outline.length / 10000) : 1;
     const path = new Path2D();
     path.moveTo(outline[0][0], outline[0][1]);
@@ -65,10 +121,7 @@ export function buildStrokePath(
     return path;
   } catch (e) {
     inkLog("E_PF_THROW", e);
-    const path = new Path2D();
-    path.moveTo(input[0][0], input[0][1]);
-    for (let i = 1; i < input.length; i++) path.lineTo(input[i][0], input[i][1]);
-    return path;
+    return capsulePath(input, size);
   }
 }
 
