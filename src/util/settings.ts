@@ -157,7 +157,7 @@ export const DEFAULT_SETTINGS: PyoInkSettings = {
   eraserWidth: 28,
   toolCycle: ["pen", "highlighter", "eraser"],
   enableTwoFingerToolCycle: true,
-  enablePencilDoubleTap: true,
+  enablePencilDoubleTap: false,
   pencilDoubleTapAction: "cycle_tool",
   pencilSingleTapAction: "ink",
   penOnlyInk: true,
@@ -232,7 +232,8 @@ export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined
   if (s.enablePencilDoubleTap === undefined && s.enablePencilDoubleTapProbe !== undefined) {
     s.enablePencilDoubleTap = !!s.enablePencilDoubleTapProbe;
   }
-  if (s.enablePencilDoubleTap === undefined) s.enablePencilDoubleTap = true;
+  // Prefer off: handwriting lifts were misread as tip double-taps
+  if (s.enablePencilDoubleTap === undefined) s.enablePencilDoubleTap = false;
   s.pencilDoubleTapAction = asFingerAction(
     s.pencilDoubleTapAction,
     "cycle_tool",

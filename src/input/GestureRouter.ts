@@ -182,7 +182,8 @@ export class GestureRouter {
 
   /** True while a pen tip is physically down (block palm). */
   private penTipDown(): boolean {
-    return this.penDownIds.size > 0 || this.activeDrawType === "pen";
+    // Do NOT use activeDrawType — it can stick and confuse channels.
+    return this.penDownIds.size > 0;
   }
 
   /** Palm guard for ink — includes short post-pen window. */
@@ -224,12 +225,22 @@ export class GestureRouter {
     this.movedPx = 0;
 
     if (ev.pointerType === "pen") {
-      // Contact only (not hover). Hover must not mark tip-down.
-      const contacting =
-        ev.buttons > 0 || (typeof ev.pressure === "number" && ev.pressure > 0);
+      // Contact only: buttons > 0. Pressure-only is unreliable (hover).
+      const contacting = ev.buttons > 0;
       if (contacting) {
-        // Pencil always wins over leftover touch pan/pinch locks
-        this.preemptForPen(ev.pointerId);
+        this.penDownIds.clear();
+        this.penDownIds.add(ev.pointerId);
+        // Fresh stroke: drop any stale draw lock from previous lift race
+        if (this.activeDrawId !== null && this.activeDrawId !== ev.pointerId) {
+          this.clearActiveDraw();
+        }
+        // Clear touch-only junk lightly
+        this.fingerIds.clear();
+        this.multiFingerAnchor = null;
+        this.multiFingerMaxMove = 0;
+        this.pinch = null;
+      } else {
+        this.penDownIds.delete(ev.pointerId);
       }
       this.lastPenAt = performance.now();
       this.penDownAt = performance.now();
@@ -300,8 +311,8 @@ export class GestureRouter {
 
     if (ev.pointerType === "pen") {
       this.lastPenAt = performance.now();
-      // CRITICAL: do not treat hover (buttons===0) as tip-down — freezes scroll + kills hover UX
-      if (ev.buttons > 0 || (typeof ev.pressure === "number" && ev.pressure > 0.01)) {
+      // Contact = buttons pressed. Do NOT use pressure alone (iPad hover can report pressure).
+      if (ev.buttons > 0) {
         this.penDownIds.add(ev.pointerId);
       } else {
         this.penDownIds.delete(ev.pointerId);
