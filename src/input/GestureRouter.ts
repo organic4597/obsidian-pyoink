@@ -238,6 +238,26 @@ export class GestureRouter {
     return this.penTipDown();
   }
 
+  /** Last pen event time (for writing-session palm pan guard). */
+  getLastPenAt(): number {
+    return this.lastPenAt;
+  }
+
+  /**
+   * True while finger/palm must not pan/drag:
+   * tip down, active pen stroke, or within writingPalmGuardMs after pen use.
+   */
+  blocksFingerPan(s?: PyoInkSettings): boolean {
+    if (this.penTipDown()) return true;
+    if (this.activeDrawType === "pen" && this.activeDrawId !== null) return true;
+    const cfg = s ?? this.settings();
+    const guard = cfg.writingPalmGuardMs ?? 2000;
+    if (guard > 0 && this.lastPenAt > 0 && performance.now() - this.lastPenAt < guard) {
+      return true;
+    }
+    return false;
+  }
+
   /**
    * Nuke all touch/palm tracking so a mid-write hand rest cannot keep
    * a scroll/drag lock that steals the next pen stroke.
@@ -314,10 +334,9 @@ export class GestureRouter {
     }
 
     if (ev.pointerType === "touch") {
-      // Palm/hand while Pencil is writing: never start a pan/drag lock.
-      // (Post-pen palmReject still allows finger pan after lift — only tip-down blocks.)
-      if (this.penTipDown() || this.activeDrawType === "pen") {
-        inkLog("E_PALM", "touch_down_while_pen");
+      // Tip down or active pen stroke: hard-ignore all touch (no palm pan)
+      if (this.penTipDown() || (this.activeDrawType === "pen" && this.activeDrawId !== null)) {
+        inkLog("E_PALM", "touch_while_pen_tip");
         return { type: "ignore" };
       }
 
@@ -333,6 +352,13 @@ export class GestureRouter {
         this.armMulti(sample, this.fingerIds.size);
         const pinch = this.beginPinchIfPossible(s);
         if (pinch) return pinch;
+        return { type: "ignore" };
+      }
+
+      // Writing session (after recent pen): single finger must NOT pan/drag.
+      // User hand rests between Hangul strokes (ㅁ sides) — palm would steal.
+      if (this.blocksFingerPan(s)) {
+        inkLog("E_PALM", "touch_blocked_writing_session");
         return { type: "ignore" };
       }
 

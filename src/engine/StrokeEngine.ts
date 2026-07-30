@@ -260,14 +260,37 @@ export class StrokeEngine {
     const simulate =
       this.settings.simulatePressureFallback &&
       (s === this.active ? !this.sawRealPressure : pressureMostlyFlat(s.points));
-    const path = buildStrokePath(
-      s.points,
-      { tool: s.tool, color: s.color, size: s.size },
-      this.settings,
-      { last, simulatePressure: simulate },
-    );
-    if (!path) return;
-    fillStrokePath(ctx, path, { tool: s.tool, color: s.color, size: s.size }, false);
+    const style = { tool: s.tool, color: s.color, size: s.size };
+    const path = buildStrokePath(s.points, style, this.settings, {
+      last,
+      simulatePressure: simulate,
+    });
+    if (path) {
+      fillStrokePath(ctx, path, style, false);
+      return;
+    }
+    // Absolute last resort — never leave Hangul jamo invisible
+    if (s.points.length === 0) return;
+    ctx.save();
+    ctx.globalAlpha = s.tool === "highlighter" ? 0.4 : 1;
+    ctx.strokeStyle = s.color;
+    ctx.fillStyle = s.color;
+    ctx.lineWidth = Math.max(1, s.size);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    if (s.points.length === 1) {
+      ctx.beginPath();
+      ctx.arc(s.points[0][0], s.points[0][1], Math.max(0.6, s.size * 0.45), 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(s.points[0][0], s.points[0][1]);
+      for (let i = 1; i < s.points.length; i++) {
+        ctx.lineTo(s.points[i][0], s.points[i][1]);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 }
 

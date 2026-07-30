@@ -15,10 +15,18 @@
 }
 
 .pyoink-root.is-pen-inking,
-.pyoink-root.is-pen-inking * {
+.pyoink-root.is-pen-inking *,
+.pyoink-root.is-writing-session,
+.pyoink-root.is-writing-session * {
   -webkit-user-select: none !important;
   user-select: none !important;
   caret-color: transparent !important;
+}
+
+/* During writing session, block browser-level drag of content */
+.pyoink-root.is-writing-session .pyoink-scroll,
+.pyoink-root.is-pen-inking .pyoink-scroll {
+  touch-action: none !important;
 }
 
 /* Allow text selection only in navigate mode (link/read) */

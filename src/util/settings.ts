@@ -95,6 +95,8 @@ export interface PyoInkSettings {
   minZoom: number;
   maxZoom: number;
   palmRejectMs: number;
+  /** After pen activity, block finger pan this long (ms). */
+  writingPalmGuardMs: number;
   simulatePressureFallback: boolean;
   pressureGain: number;
   pfSmoothing: number;
@@ -175,9 +177,14 @@ export const DEFAULT_SETTINGS: PyoInkSettings = {
   maxZoom: 3,
   /**
    * After pen lift, block touch-as-ink for this many ms (palm safety only).
-   * Does not delay Pencil re-down. Default 50ms (0.05s) — near zero.
+   * Does not delay Pencil re-down.
    */
   palmRejectMs: 50,
+  /**
+   * After any Pencil activity, block finger/palm pan/drag for this long (ms).
+   * Hangul multi-stroke (ㅁ) lifts the tip briefly — palm must not steal pan.
+   */
+  writingPalmGuardMs: 2000,
   simulatePressureFallback: true,
   pressureGain: 1.2,
   /** Outline smoothing (perfect-freehand). Higher = smoother stroke edges. */
@@ -235,6 +242,10 @@ export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined
     if (rawPalm === 700 || rawPalm === 220 || rawPalm === 600) s.palmRejectMs = 50;
   }
   s.palmRejectMs = clamp(Number(s.palmRejectMs), 0, 3000);
+  if (s.writingPalmGuardMs === undefined || Number.isNaN(Number(s.writingPalmGuardMs))) {
+    s.writingPalmGuardMs = 2000;
+  }
+  s.writingPalmGuardMs = clamp(Number(s.writingPalmGuardMs), 0, 10000);
   s.toolbarXPct = clamp(Number(s.toolbarXPct), 5, 95);
   s.toolbarYPct = clamp(Number(s.toolbarYPct), 5, 95);
   if (s.penOnlyInk === undefined) s.penOnlyInk = true;

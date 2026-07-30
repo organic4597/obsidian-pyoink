@@ -85,22 +85,21 @@ export function buildStrokePath(
   const size = Math.max(0.5, style.size);
   const len = pathLen(input);
 
-  // Hangul jamo / quick flicks: always use capsule (never invisible)
-  // ㅣ is often 2–8 samples and only a few CSS px long.
-  if (input.length <= 6 || len < size * 3.5) {
+  // Hangul multi-stroke (ㅁ = 3–4 sides): each side is short. Prefer capsule
+  // whenever the stroke is not long enough for PF to be stable.
+  if (input.length <= 14 || len < size * 8) {
     return capsulePath(input, size);
   }
 
   try {
-    // Slightly less streamline on non-final frames keeps live ink visible;
-    // short strokes already handled above.
+    // Live ink: keep streamline low so sides of ㅁ stay visible mid-stroke
     const streamline = opts.last
-      ? settings.pfStreamline
-      : Math.min(settings.pfStreamline, 0.45);
+      ? Math.min(settings.pfStreamline, 0.5)
+      : Math.min(settings.pfStreamline, 0.35);
     const outline = getStroke(input, {
       size,
       thinning: style.tool === "highlighter" ? 0.05 : settings.pfThinning,
-      smoothing: Math.min(settings.pfSmoothing, opts.last ? settings.pfSmoothing : 0.5),
+      smoothing: Math.min(settings.pfSmoothing, opts.last ? 0.55 : 0.4),
       streamline,
       simulatePressure: opts.simulatePressure,
       last: opts.last,
