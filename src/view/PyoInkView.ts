@@ -479,8 +479,10 @@ export class PyoInkView extends ItemView {
   }
 
   private buildToolbar() {
-    // ——— Excalidraw-like: compact tool island (draggable) ———
+    // ——— Floating tool island (taste: grouped, quiet chrome) ———
     this.toolbarEl = this.rootEl.createDiv({ cls: "pyoink-toolbar" });
+    this.toolbarEl.setAttr("role", "toolbar");
+    this.toolbarEl.setAttr("aria-label", "PyoInk tools");
     // Default near bottom-center if never moved
     if (this.plugin.settings.toolbarYPct == null || this.plugin.settings.toolbarYPct > 96) {
       this.plugin.settings.toolbarYPct = 90;
@@ -490,23 +492,30 @@ export class PyoInkView extends ItemView {
     }
 
     const drag = this.toolbarEl.createDiv({ cls: "pyoink-tb-drag" });
+    drag.setAttr("aria-label", "Drag toolbar");
     this.bindToolbarDrag(drag);
 
     const tools = this.toolbarEl.createDiv({ cls: "pyoink-tb-row pyoink-tb-tools" });
-    this.iconBtn(tools, "pen", "pen", "Pen");
-    this.iconBtn(tools, "highlighter", "highlighter", "Highlighter");
-    this.iconBtn(tools, "eraser", "eraser", "Eraser");
 
-    this.navBtn = tools.createEl("button", { cls: "pyoink-tb-icon" });
-    this.navBtn.title = "Navigate (links)";
+    const gDraw = tools.createDiv({ cls: "pyoink-tb-group", attr: { "aria-label": "Draw" } });
+    this.iconBtn(gDraw, "pen", "pen", "Pen");
+    this.iconBtn(gDraw, "highlighter", "highlighter", "Highlighter");
+    this.iconBtn(gDraw, "eraser", "eraser", "Eraser");
+
+    this.navBtn = tools.createEl("button", {
+      cls: "pyoink-tb-icon",
+      attr: { "aria-label": "Navigate links", title: "Navigate (links)" },
+    });
     this.setSvgIcon(this.navBtn, "nav");
     this.navBtn.onclick = () => this.setNavigate(!this.gestures.navigateMode);
 
-    const sep = tools.createSpan({ cls: "pyoink-tb-sep" });
-    sep.setAttr("aria-hidden", "true");
+    tools.createSpan({ cls: "pyoink-tb-sep", attr: { "aria-hidden": "true" } });
 
-    this.undoBtn = tools.createEl("button", { cls: "pyoink-tb-icon" });
-    this.undoBtn.title = "Undo";
+    const gHist = tools.createDiv({ cls: "pyoink-tb-group", attr: { "aria-label": "History" } });
+    this.undoBtn = gHist.createEl("button", {
+      cls: "pyoink-tb-icon",
+      attr: { "aria-label": "Undo", title: "Undo" },
+    });
     this.setSvgIcon(this.undoBtn, "undo");
     this.undoBtn.onclick = () => {
       this.finishStrokeIfNeeded();
@@ -518,8 +527,10 @@ export class PyoInkView extends ItemView {
       }
     };
 
-    this.redoBtn = tools.createEl("button", { cls: "pyoink-tb-icon" });
-    this.redoBtn.title = "Redo";
+    this.redoBtn = gHist.createEl("button", {
+      cls: "pyoink-tb-icon",
+      attr: { "aria-label": "Redo", title: "Redo" },
+    });
     this.setSvgIcon(this.redoBtn, "redo");
     this.redoBtn.onclick = () => {
       this.finishStrokeIfNeeded();
@@ -531,22 +542,34 @@ export class PyoInkView extends ItemView {
       }
     };
 
-    const zOut = tools.createEl("button", { cls: "pyoink-tb-icon", text: "−" });
-    zOut.title = "Zoom out";
+    tools.createSpan({ cls: "pyoink-tb-sep", attr: { "aria-hidden": "true" } });
+
+    const gZoom = tools.createDiv({ cls: "pyoink-tb-group pyoink-tb-zoom", attr: { "aria-label": "Zoom" } });
+    const zOut = gZoom.createEl("button", {
+      cls: "pyoink-tb-icon",
+      text: "−",
+      attr: { "aria-label": "Zoom out", title: "Zoom out" },
+    });
     zOut.onclick = () => this.bumpZoom(1 / 1.15);
-    // Live zoom readout (was static "1×") — tap resets to 100%
-    this.zoomBadgeEl = tools.createEl("button", {
+    this.zoomBadgeEl = gZoom.createEl("button", {
       cls: "pyoink-tb-icon pyoink-zoom-badge",
       text: "1×",
+      attr: { "aria-label": "Reset zoom", title: "Current zoom — tap to reset" },
     });
-    this.zoomBadgeEl.title = "Current zoom — tap to reset";
     this.zoomBadgeEl.onclick = () => this.setZoom(1);
-    const zIn = tools.createEl("button", { cls: "pyoink-tb-icon", text: "+" });
-    zIn.title = "Zoom in";
+    const zIn = gZoom.createEl("button", {
+      cls: "pyoink-tb-icon",
+      text: "+",
+      attr: { "aria-label": "Zoom in", title: "Zoom in" },
+    });
     zIn.onclick = () => this.bumpZoom(1.15);
 
-    const exit = tools.createEl("button", { cls: "pyoink-tb-icon" });
-    exit.title = "Leave (save on exit)";
+    tools.createSpan({ cls: "pyoink-tb-sep", attr: { "aria-hidden": "true" } });
+
+    const exit = tools.createEl("button", {
+      cls: "pyoink-tb-icon pyoink-tb-exit",
+      attr: { "aria-label": "Exit and save", title: "Leave (save on exit)" },
+    });
     this.setSvgIcon(exit, "exit");
     exit.onclick = async () => {
       const ok = await this.flushSave();
@@ -559,16 +582,19 @@ export class PyoInkView extends ItemView {
     this.saveBadgeEl = this.toolbarEl.createDiv({
       cls: "pyoink-status is-saved",
       text: "Saved",
+      attr: { role: "status", "aria-live": "polite" },
     });
     this.updateStatusChrome();
 
-    // ——— Left properties rail (Excalidraw style panel) ———
+    // ——— Left properties rail ———
     this.propsEl = this.rootEl.createDiv({ cls: "pyoink-props" });
+    this.propsEl.setAttr("aria-label", "Style panel");
     this.propsToggleBtn = this.propsEl.createEl("button", {
       cls: "pyoink-props-toggle",
-      attr: { title: "Style panel", "aria-label": "Toggle style panel" },
+      attr: { title: "Style panel", "aria-label": "Toggle style panel", "aria-expanded": "true" },
     });
-    this.propsToggleBtn.textContent = "‹";
+    this.propsToggleBtn.innerHTML =
+      `<svg class="pyoink-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>`;
     this.propsToggleBtn.onclick = (ev) => {
       ev.preventDefault();
       this.propsCollapsed = !this.propsCollapsed;
@@ -581,13 +607,18 @@ export class PyoInkView extends ItemView {
       text: "Style",
     });
 
-    this.colorRowEl = this.propsBodyEl.createDiv({
+    const colorSec = this.propsBodyEl.createDiv({ cls: "pyoink-props-section" });
+    colorSec.createDiv({ cls: "pyoink-props-label", text: "Color" });
+    this.colorRowEl = colorSec.createDiv({
       cls: "pyoink-tb-row pyoink-color-row",
     });
-    this.rgbRowEl = this.propsBodyEl.createDiv({
+    this.rgbRowEl = colorSec.createDiv({
       cls: "pyoink-tb-row pyoink-rgb-row",
     });
-    this.widthRowEl = this.propsBodyEl.createDiv({
+
+    const sizeSec = this.propsBodyEl.createDiv({ cls: "pyoink-props-section" });
+    sizeSec.createDiv({ cls: "pyoink-props-label", text: "Size" });
+    this.widthRowEl = sizeSec.createDiv({
       cls: "pyoink-tb-row pyoink-width-row",
     });
 
@@ -607,13 +638,21 @@ export class PyoInkView extends ItemView {
     this.propsEl.style.display = hideForNav ? "none" : "";
     this.propsEl.classList.toggle("is-collapsed", this.propsCollapsed);
     if (this.propsToggleBtn) {
-      this.propsToggleBtn.textContent = this.propsCollapsed ? "›" : "‹";
+      this.propsToggleBtn.setAttr("aria-expanded", this.propsCollapsed ? "false" : "true");
       this.propsToggleBtn.title = this.propsCollapsed
         ? "Show style panel"
         : "Hide style panel";
+      this.propsToggleBtn.setAttr(
+        "aria-label",
+        this.propsCollapsed ? "Show style panel" : "Hide style panel",
+      );
     }
     // Eraser: still show width, hide colors
-    if (this.colorRowEl) {
+    const colorSec = this.colorRowEl?.parentElement;
+    if (colorSec?.classList.contains("pyoink-props-section")) {
+      colorSec.style.display =
+        tool === "eraser" || this.propsCollapsed ? "none" : "";
+    } else if (this.colorRowEl) {
       this.colorRowEl.style.display =
         tool === "eraser" || this.propsCollapsed ? "none" : "";
     }
@@ -630,9 +669,11 @@ export class PyoInkView extends ItemView {
   }
 
   private iconBtn(parent: HTMLElement, tool: InkTool, iconKey: string, title: string) {
-    const b = parent.createEl("button", { cls: "pyoink-tb-icon" });
+    const b = parent.createEl("button", {
+      cls: "pyoink-tb-icon",
+      attr: { "aria-label": title, title },
+    });
     b.dataset.tool = tool;
-    b.title = title;
     this.setSvgIcon(b, iconKey);
     b.onclick = () => {
       this.finishStrokeIfNeeded();
@@ -880,26 +921,38 @@ export class PyoInkView extends ItemView {
     const toolLabel =
       tool === "eraser" ? "Eraser" : tool === "highlighter" ? "Marker" : "Pen";
 
-    this.widthRowEl.createSpan({
-      text: `${toolLabel}`,
+    const head = this.widthRowEl.createDiv({ cls: "pyoink-width-head" });
+    head.createSpan({
+      text: toolLabel,
       cls: "pyoink-width-label",
     });
+    const val = head.createSpan({
+      text: `${idx + 1}/7`,
+      cls: "pyoink-width-val",
+    });
 
-    // Slider only (no −/+) — cleaner left rail alignment
+    // Slider only — size steps 1…7
     const range = this.widthRowEl.createEl("input", {
       type: "range",
       cls: "pyoink-width-slider",
+      attr: {
+        "aria-label": `${toolLabel} size`,
+        title: `${toolLabel} size (7 steps)`,
+      },
     });
     range.min = "0";
     range.max = String(steps.length - 1);
     range.step = "1";
     range.value = String(idx);
-    range.title = `${toolLabel} size (7 steps)`;
 
-    const val = this.widthRowEl.createSpan({
-      text: `${idx + 1}/7`,
-      cls: "pyoink-width-val",
+    const ticks = this.widthRowEl.createDiv({
+      cls: "pyoink-width-ticks",
+      attr: { "aria-hidden": "true" },
     });
+    for (let i = 0; i < steps.length; i++) {
+      const t = ticks.createSpan({ cls: "pyoink-width-tick" });
+      if (i === idx) t.addClass("is-active");
+    }
 
     const applyW = (i: number) => {
       const ii = Math.max(0, Math.min(steps.length - 1, Math.round(i)));
@@ -911,6 +964,9 @@ export class PyoInkView extends ItemView {
       void this.plugin.saveSettings();
       range.value = String(ii);
       val.setText(`${ii + 1}/7`);
+      ticks.querySelectorAll(".pyoink-width-tick").forEach((el, n) => {
+        el.classList.toggle("is-active", n === ii);
+      });
       this.updateCanvasCursor();
       this.requestRedraw();
     };
@@ -2140,7 +2196,7 @@ export class PyoInkView extends ItemView {
       snapshotAt: Date.now(),
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.5.1";
+    this.doc.meta.appVersion = "0.5.2";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new Notice("PyoInk: remote ink changed — saving local will overwrite");

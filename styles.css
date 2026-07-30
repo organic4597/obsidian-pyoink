@@ -195,9 +195,44 @@
   pointer-events: none;
 }
 
-/* ========== Excalidraw-inspired chrome ========== */
+/* ========== Chrome design system (taste · impeccable · Pro Max) ==========
+   Theme-adaptive glass · 8px rhythm · ≥44px hits · one accent · quiet hierarchy */
+.pyoink-root {
+  --pyoink-space-1: 4px;
+  --pyoink-space-2: 8px;
+  --pyoink-space-3: 12px;
+  --pyoink-space-4: 16px;
+  --pyoink-radius-sm: 8px;
+  --pyoink-radius-md: 12px;
+  --pyoink-radius-lg: 18px;
+  --pyoink-radius-pill: 999px;
+  --pyoink-hit: 44px;
+  --pyoink-hit-sm: 40px;
+  --pyoink-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --pyoink-dur: 180ms;
+  --pyoink-blur: 18px;
+  --pyoink-surface: color-mix(in srgb, var(--background-secondary) 86%, transparent);
+  --pyoink-surface-strong: color-mix(in srgb, var(--background-secondary) 94%, var(--background-primary));
+  --pyoink-border: color-mix(in srgb, var(--background-modifier-border) 85%, transparent);
+  --pyoink-border-strong: var(--background-modifier-border);
+  --pyoink-shadow:
+    0 1px 0 color-mix(in srgb, #fff 6%, transparent) inset,
+    0 8px 28px rgba(0, 0, 0, 0.16),
+    0 2px 8px rgba(0, 0, 0, 0.08);
+  --pyoink-shadow-lift:
+    0 1px 0 color-mix(in srgb, #fff 8%, transparent) inset,
+    0 14px 40px rgba(0, 0, 0, 0.22),
+    0 4px 12px rgba(0, 0, 0, 0.1);
+  --pyoink-accent: var(--interactive-accent);
+  --pyoink-on-accent: var(--text-on-accent, #fff);
+  --pyoink-muted: var(--text-muted);
+  --pyoink-fg: var(--text-normal);
+  --pyoink-focus: 0 0 0 2px var(--background-primary), 0 0 0 4px var(--pyoink-accent);
+  font-family: var(--font-interface), ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
 
-/* Compact tool island (bottom, draggable) — tools only */
+/* Floating tool island */
 .pyoink-toolbar {
   position: absolute;
   z-index: 50;
@@ -206,26 +241,31 @@
   transform: none;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 6px 8px 8px;
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--background-secondary) 94%, transparent);
-  border: 1px solid var(--background-modifier-border);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.18);
-  backdrop-filter: blur(12px);
+  align-items: stretch;
+  gap: var(--pyoink-space-1);
+  padding: 6px 10px 8px;
+  border-radius: var(--pyoink-radius-lg);
+  background: var(--pyoink-surface);
+  border: 1px solid var(--pyoink-border);
+  box-shadow: var(--pyoink-shadow);
+  backdrop-filter: blur(var(--pyoink-blur)) saturate(1.2);
+  -webkit-backdrop-filter: blur(var(--pyoink-blur)) saturate(1.2);
   pointer-events: auto;
   touch-action: none;
-  max-width: min(96%, 520px);
+  max-width: min(96vw, 560px);
   overflow: visible;
   user-select: none;
   -webkit-user-select: none;
-  color: var(--text-normal);
+  color: var(--pyoink-fg);
   -webkit-app-region: no-drag;
+  transition:
+    box-shadow var(--pyoink-dur) var(--pyoink-ease),
+    opacity var(--pyoink-dur) var(--pyoink-ease);
 }
 
 .pyoink-toolbar.is-dragging {
-  opacity: 0.96;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+  opacity: 0.98;
+  box-shadow: var(--pyoink-shadow-lift);
   z-index: 60;
 }
 
@@ -239,91 +279,139 @@
 
 .pyoink-tb-tools {
   flex-wrap: nowrap;
+  gap: var(--pyoink-space-1);
+  padding: 2px 0;
+}
+
+.pyoink-tb-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--pyoink-radius-md);
+  background: color-mix(in srgb, var(--background-primary) 35%, transparent);
+}
+
+.pyoink-tb-zoom {
+  min-width: 0;
 }
 
 .pyoink-tb-sep {
   width: 1px;
-  height: 22px;
-  margin: 0 4px;
-  background: var(--background-modifier-border);
+  height: 20px;
+  margin: 0 2px;
+  background: var(--pyoink-border-strong);
+  opacity: 0.7;
   flex-shrink: 0;
+  border-radius: 1px;
 }
 
 .pyoink-tb-drag {
   cursor: grab;
   touch-action: none;
   width: 100%;
-  height: 16px;
+  height: 14px;
   display: flex;
   align-items: center;
   justify-content: center;
-  opacity: 0.5;
-  margin: 0 0 2px;
+  opacity: 0.45;
+  margin: 0;
   flex-shrink: 0;
+  transition: opacity var(--pyoink-dur) var(--pyoink-ease);
 }
 
+.pyoink-tb-drag:hover,
 .pyoink-tb-drag:active {
+  opacity: 0.85;
   cursor: grabbing;
 }
 
 .pyoink-tb-drag::before {
   content: "";
-  width: 28px;
+  width: 32px;
   height: 3px;
-  border-radius: 99px;
-  background: var(--text-muted);
+  border-radius: var(--pyoink-radius-pill);
+  background: var(--pyoink-muted);
 }
 
-/* Left style rail (like Excalidraw properties) — docked to ink pane, NOT Obsidian sidebar */
+/* Left style rail */
 .pyoink-props {
   position: absolute;
   z-index: 48;
-  left: 10px;
+  left: 12px;
   top: 50%;
   transform: translateY(-50%);
   display: flex;
   flex-direction: row-reverse;
   align-items: stretch;
   gap: 0;
-  max-height: min(78%, 560px);
+  max-height: min(78%, 580px);
   pointer-events: auto;
   touch-action: none;
   -webkit-app-region: no-drag;
   user-select: none;
+  filter: drop-shadow(0 10px 28px rgba(0, 0, 0, 0.14));
 }
 
 .pyoink-props-toggle {
   width: 28px !important;
   min-width: 28px !important;
   height: auto !important;
-  min-height: 64px;
+  min-height: 72px;
   align-self: center;
-  border-radius: 0 10px 10px 0 !important;
-  border: 1px solid var(--background-modifier-border) !important;
+  border-radius: 0 var(--pyoink-radius-md) var(--pyoink-radius-md) 0 !important;
+  border: 1px solid var(--pyoink-border) !important;
   border-left: none !important;
-  background: color-mix(in srgb, var(--background-secondary) 96%, transparent) !important;
-  color: var(--text-normal) !important;
-  font-size: 16px !important;
-  font-weight: 700 !important;
-  box-shadow: 2px 0 10px rgba(0, 0, 0, 0.08);
+  background: var(--pyoink-surface) !important;
+  color: var(--pyoink-muted) !important;
+  backdrop-filter: blur(var(--pyoink-blur));
+  -webkit-backdrop-filter: blur(var(--pyoink-blur));
   cursor: pointer;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  transition:
+    color var(--pyoink-dur) var(--pyoink-ease),
+    background var(--pyoink-dur) var(--pyoink-ease);
+}
+
+.pyoink-props-toggle:hover {
+  color: var(--pyoink-fg) !important;
+  background: var(--pyoink-surface-strong) !important;
+}
+
+.pyoink-props-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--pyoink-focus);
+  z-index: 1;
+}
+
+.pyoink-props-toggle .pyoink-chevron {
+  width: 16px;
+  height: 16px;
+  transition: transform var(--pyoink-dur) var(--pyoink-ease);
+}
+
+.pyoink-props.is-collapsed .pyoink-props-toggle .pyoink-chevron {
+  transform: rotate(180deg);
 }
 
 .pyoink-props-body {
-  width: 200px;
-  padding: 10px 10px 12px;
-  border-radius: 14px 0 0 14px;
-  background: color-mix(in srgb, var(--background-secondary) 96%, transparent);
-  border: 1px solid var(--background-modifier-border);
+  width: 212px;
+  padding: var(--pyoink-space-3) var(--pyoink-space-3) var(--pyoink-space-4);
+  border-radius: var(--pyoink-radius-lg) 0 0 var(--pyoink-radius-lg);
+  background: var(--pyoink-surface);
+  border: 1px solid var(--pyoink-border);
   border-right: none;
-  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.16);
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(var(--pyoink-blur)) saturate(1.15);
+  -webkit-backdrop-filter: blur(var(--pyoink-blur)) saturate(1.15);
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--pyoink-space-3);
+  scrollbar-width: thin;
 }
 
 .pyoink-props.is-collapsed .pyoink-props-body {
@@ -331,36 +419,82 @@
 }
 
 .pyoink-props.is-collapsed .pyoink-props-toggle {
-  border-radius: 10px !important;
-  border: 1px solid var(--background-modifier-border) !important;
-  min-height: 72px;
+  border-radius: var(--pyoink-radius-md) !important;
+  border: 1px solid var(--pyoink-border) !important;
+  min-height: 80px;
+  background: var(--pyoink-surface) !important;
 }
 
 .pyoink-props-title {
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-weight: 650;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--text-muted);
-  padding: 0 2px 2px;
+  color: var(--pyoink-muted);
+  padding: 0 2px;
+  line-height: 1.2;
 }
 
-/* Force icon visibility (theme-independent stroke) */
+.pyoink-props-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pyoink-space-2);
+  padding: var(--pyoink-space-2);
+  border-radius: var(--pyoink-radius-md);
+  background: color-mix(in srgb, var(--background-primary) 42%, transparent);
+  border: 1px solid color-mix(in srgb, var(--pyoink-border) 70%, transparent);
+}
+
+.pyoink-props-label {
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--pyoink-muted);
+  padding: 0 2px;
+  opacity: 0.9;
+}
+
+/* Buttons — ≥40px hits, pointer, focus, quiet hover */
 .pyoink-toolbar button,
 .pyoink-toolbar .pyoink-tb-icon,
 .pyoink-props button.pyoink-tb-icon {
-  width: 38px;
-  height: 38px;
-  min-width: 38px;
+  width: var(--pyoink-hit-sm);
+  height: var(--pyoink-hit-sm);
+  min-width: var(--pyoink-hit-sm);
+  min-height: var(--pyoink-hit-sm);
   padding: 0;
-  border-radius: 11px;
+  border-radius: var(--pyoink-radius-sm);
   border: none;
   background: transparent;
-  color: var(--text-normal) !important;
+  color: var(--pyoink-fg) !important;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  transition:
+    background var(--pyoink-dur) var(--pyoink-ease),
+    color var(--pyoink-dur) var(--pyoink-ease),
+    transform 120ms var(--pyoink-ease),
+    box-shadow var(--pyoink-dur) var(--pyoink-ease);
+}
+
+.pyoink-toolbar button:hover:not(:disabled):not(.is-active),
+.pyoink-props button.pyoink-tb-icon:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--background-modifier-hover, var(--background-primary)) 80%, transparent);
+}
+
+.pyoink-toolbar button:active:not(:disabled),
+.pyoink-props button.pyoink-tb-icon:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.pyoink-toolbar button:focus-visible,
+.pyoink-props button:focus-visible,
+.pyoink-props-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--pyoink-focus);
 }
 
 .pyoink-toolbar button .pyoink-icon,
@@ -383,13 +517,24 @@
 }
 
 .pyoink-toolbar button.is-active {
-  background: var(--interactive-accent);
-  color: var(--text-on-accent, #fff) !important;
+  background: var(--pyoink-accent);
+  color: var(--pyoink-on-accent) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
 }
 
 .pyoink-toolbar button.is-active svg {
   stroke: currentColor !important;
   color: inherit !important;
+}
+
+.pyoink-toolbar button.is-active:hover {
+  background: var(--pyoink-accent);
+  filter: brightness(1.05);
+}
+
+.pyoink-tb-exit:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-error, #e74c3c) 14%, transparent) !important;
+  color: var(--text-error, #e74c3c) !important;
 }
 
 /* Color swatches in props rail */
@@ -400,6 +545,11 @@
   width: 100%;
 }
 
+.pyoink-props .pyoink-color-row {
+  gap: 6px !important;
+  flex-wrap: wrap;
+}
+
 .pyoink-props .pyoink-rgb-panel {
   max-height: min(36vh, 220px);
 }
@@ -408,29 +558,47 @@
 .pyoink-props button[disabled] {
   opacity: 0.35;
   pointer-events: none;
+  cursor: not-allowed;
 }
 
 /* Color swatches — selected = check only (no purple ring) */
 .pyoink-swatch {
   position: relative;
-  width: 28px !important;
-  height: 28px !important;
-  min-width: 28px !important;
-  border-radius: 999px !important;
-  border: 1px solid rgba(0, 0, 0, 0.18) !important;
+  width: 32px !important;
+  height: 32px !important;
+  min-width: 32px !important;
+  min-height: 32px !important;
+  border-radius: var(--pyoink-radius-pill) !important;
+  border: 1px solid rgba(0, 0, 0, 0.16) !important;
   padding: 0 !important;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
   overflow: visible;
   background-clip: padding-box;
+  cursor: pointer;
+  transition:
+    transform 120ms var(--pyoink-ease),
+    box-shadow var(--pyoink-dur) var(--pyoink-ease);
+}
+
+.pyoink-swatch:hover {
+  transform: scale(1.06);
+}
+
+.pyoink-swatch:focus-visible {
+  outline: none;
+  box-shadow: var(--pyoink-focus);
 }
 
 .pyoink-swatch.is-active {
-  border-color: rgba(0, 0, 0, 0.25) !important;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.15) !important;
+  border-color: rgba(0, 0, 0, 0.28) !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+    0 0 0 2px color-mix(in srgb, var(--background-primary) 90%, transparent),
+    0 0 0 3.5px color-mix(in srgb, var(--pyoink-fg) 35%, transparent) !important;
   background-image: none !important;
-  /* do NOT use accent fill — keep the color itself */
   background-color: inherit !important;
   color: #fff !important;
+  transform: none;
 }
 
 .pyoink-swatch-check {
@@ -451,7 +619,7 @@
   stroke-width: 3 !important;
 }
 
-/* RGB / palette — circle picker */
+/* RGB / palette */
 .pyoink-rgb-row {
   gap: 6px !important;
   width: 100%;
@@ -461,35 +629,34 @@
 }
 
 .pyoink-rgb-current {
-  width: 30px !important;
-  height: 30px !important;
-  min-width: 30px !important;
+  width: 32px !important;
+  height: 32px !important;
+  min-width: 32px !important;
 }
 
 .pyoink-rgb-toggle {
-  font-size: 16px !important;
+  font-size: 15px !important;
   line-height: 1 !important;
+  font-weight: 600 !important;
+  color: var(--pyoink-muted) !important;
 }
 
 .pyoink-rgb-native-wrap {
   position: relative;
-  width: 30px;
-  height: 30px;
-  border-radius: 999px;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--pyoink-radius-pill);
   overflow: hidden;
-  border: 1px solid var(--background-modifier-border);
+  border: 1px solid var(--pyoink-border-strong);
   flex-shrink: 0;
   cursor: pointer;
-  background:
-    conic-gradient(
-      red,
-      yellow,
-      lime,
-      aqua,
-      blue,
-      magenta,
-      red
-    );
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  background: conic-gradient(red, yellow, lime, aqua, blue, magenta, red);
+  transition: transform 120ms var(--pyoink-ease);
+}
+
+.pyoink-rgb-native-wrap:hover {
+  transform: scale(1.06);
 }
 
 .pyoink-rgb-native {
@@ -506,42 +673,43 @@
 
 .pyoink-rgb-panel {
   width: 100%;
-  margin-top: 4px;
-  padding: 8px;
-  border-radius: 12px;
-  background: var(--background-primary);
-  border: 1px solid var(--background-modifier-border);
+  margin-top: 2px;
+  padding: var(--pyoink-space-2);
+  border-radius: var(--pyoink-radius-md);
+  background: color-mix(in srgb, var(--background-primary) 88%, transparent);
+  border: 1px solid var(--pyoink-border);
   max-height: min(42vh, 280px);
   overflow: auto;
   -webkit-overflow-scrolling: touch;
 }
 
 .pyoink-rgb-panel-title {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--pyoink-muted);
   margin: 0 0 6px 2px;
 }
 
 .pyoink-rgb-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(26px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(28px, 1fr));
   gap: 6px;
   width: 100%;
 }
 
 .pyoink-rgb-circle {
-  width: 26px !important;
-  height: 26px !important;
-  min-width: 26px !important;
-  border-radius: 999px !important;
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
+  border-radius: var(--pyoink-radius-pill) !important;
 }
 
-/* legacy slider bits unused but harmless if present */
 .pyoink-rgb-preview {
   width: 22px;
   height: 22px;
-  border-radius: 999px;
+  border-radius: var(--pyoink-radius-pill);
   border: 1px solid rgba(0, 0, 0, 0.2);
   flex-shrink: 0;
 }
@@ -550,71 +718,189 @@
   display: none;
 }
 
-/* Width 7-step slider (+/− for iPad) */
+/* Size section — label row + full-width slider + ticks */
 .pyoink-width-row {
   width: 100%;
   gap: 6px !important;
-  justify-content: stretch !important;
-  align-items: center !important;
+  flex-direction: column !important;
+  flex-wrap: nowrap !important;
+  align-items: stretch !important;
+  justify-content: flex-start !important;
+}
+
+.pyoink-width-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  width: 100%;
+  gap: var(--pyoink-space-2);
 }
 
 .pyoink-width-label {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--pyoink-fg);
   flex-shrink: 0;
-  min-width: 44px;
-}
-
-.pyoink-width-slider {
-  flex: 1;
-  min-width: 80px;
-  height: 28px;
-  accent-color: var(--interactive-accent);
 }
 
 .pyoink-width-val {
   font-size: 11px;
-  font-weight: 700;
-  color: var(--text-normal);
+  font-weight: 650;
+  color: var(--pyoink-muted);
   min-width: 28px;
   text-align: right;
+  font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
 
-.pyoink-toolbar button[disabled] {
-  opacity: 0.35;
-  pointer-events: none;
+.pyoink-width-slider {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  margin: 0;
+  accent-color: var(--pyoink-accent);
+  cursor: pointer;
 }
 
-/* Status / zoom badges */
+.pyoink-width-slider:focus-visible {
+  outline: none;
+  box-shadow: var(--pyoink-focus);
+  border-radius: 4px;
+}
+
+.pyoink-width-ticks {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 2px;
+  margin-top: -2px;
+}
+
+.pyoink-width-tick {
+  width: 4px;
+  height: 4px;
+  border-radius: var(--pyoink-radius-pill);
+  background: var(--pyoink-border-strong);
+  opacity: 0.55;
+  transition:
+    background var(--pyoink-dur) var(--pyoink-ease),
+    opacity var(--pyoink-dur) var(--pyoink-ease),
+    transform 120ms var(--pyoink-ease);
+}
+
+.pyoink-width-tick.is-active {
+  background: var(--pyoink-accent);
+  opacity: 1;
+  transform: scale(1.35);
+}
+
+/* Status pill */
 .pyoink-status {
   font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   text-align: center;
-  padding: 2px 6px;
-  border-radius: 8px;
-  opacity: 0.85;
-  margin-top: 2px;
+  padding: 3px 10px;
+  border-radius: var(--pyoink-radius-pill);
+  margin: 2px auto 0;
+  width: fit-content;
+  max-width: 100%;
+  background: color-mix(in srgb, var(--background-primary) 45%, transparent);
+  border: 1px solid transparent;
+  transition:
+    color var(--pyoink-dur) var(--pyoink-ease),
+    background var(--pyoink-dur) var(--pyoink-ease),
+    border-color var(--pyoink-dur) var(--pyoink-ease);
 }
-.pyoink-status.is-saved { color: var(--text-muted); }
-.pyoink-status.is-dirty { color: var(--text-warning, #d4a017); }
-.pyoink-status.is-saving { color: var(--interactive-accent); }
+.pyoink-status.is-saved {
+  color: var(--pyoink-muted);
+}
+.pyoink-status.is-dirty {
+  color: var(--text-warning, #d4a017);
+  border-color: color-mix(in srgb, var(--text-warning, #d4a017) 35%, transparent);
+  background: color-mix(in srgb, var(--text-warning, #d4a017) 10%, transparent);
+}
+.pyoink-status.is-saving {
+  color: var(--pyoink-accent);
+  border-color: color-mix(in srgb, var(--pyoink-accent) 35%, transparent);
+  background: color-mix(in srgb, var(--pyoink-accent) 12%, transparent);
+}
+
 button.pyoink-zoom-badge,
 .pyoink-zoom-badge {
   font-size: 11px !important;
   font-weight: 700 !important;
-  min-width: 40px !important;
+  min-width: 44px !important;
   width: auto !important;
-  padding: 0 6px !important;
+  padding: 0 8px !important;
   text-align: center;
-  color: var(--text-muted) !important;
+  color: var(--pyoink-muted) !important;
   letter-spacing: -0.02em;
   user-select: none;
   font-variant-numeric: tabular-nums;
+  border-radius: var(--pyoink-radius-sm) !important;
+}
+
+button.pyoink-zoom-badge:hover {
+  color: var(--pyoink-fg) !important;
 }
 
 button.pyoink-zoom-badge:active {
-  color: var(--text-normal) !important;
+  color: var(--pyoink-fg) !important;
+}
+
+/* Media polish (aligned tokens) */
+.pyoink-media-image {
+  border-radius: var(--pyoink-radius-sm);
+  box-shadow: var(--pyoink-shadow);
+}
+
+.pyoink-pdf-page {
+  border-radius: var(--pyoink-radius-sm);
+  box-shadow: var(--pyoink-shadow);
+}
+
+.pyoink-media-loading {
+  letter-spacing: 0.02em;
+}
+
+/* Touch / small screens — larger hits, compact rail */
+@media (max-width: 720px) {
+  .pyoink-toolbar {
+    max-width: min(98vw, 100%);
+    padding: 5px 6px 7px;
+    border-radius: 16px;
+  }
+  .pyoink-toolbar button,
+  .pyoink-toolbar .pyoink-tb-icon {
+    width: var(--pyoink-hit);
+    height: var(--pyoink-hit);
+    min-width: var(--pyoink-hit);
+    min-height: var(--pyoink-hit);
+  }
+  .pyoink-props-body {
+    width: 188px;
+  }
+  .pyoink-tb-group {
+    padding: 1px;
+  }
+}
+
+/* Accessibility: reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .pyoink-root,
+  .pyoink-toolbar,
+  .pyoink-toolbar button,
+  .pyoink-props-toggle,
+  .pyoink-props-toggle .pyoink-chevron,
+  .pyoink-swatch,
+  .pyoink-width-tick,
+  .pyoink-status,
+  .pyoink-rgb-native-wrap {
+    transition: none !important;
+  }
+  .pyoink-toolbar button:active:not(:disabled),
+  .pyoink-swatch:hover {
+    transform: none !important;
+  }
 }
