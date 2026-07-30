@@ -1,9 +1,11 @@
 import {
   ItemView,
   MarkdownRenderer,
+  MarkdownView,
   Notice,
   TFile,
   WorkspaceLeaf,
+  loadPdfJs,
 } from "obsidian";
 import type PyoInkPlugin from "../../main";
 import { StrokeEngine } from "../engine/StrokeEngine";
@@ -20,6 +22,7 @@ import {
   type FingerAction,
 } from "../util/settings";
 import { inkLog } from "../util/errors";
+import { inkableKind, type InkableKind } from "../util/media";
 
 /** Built-in SVGs — setIcon lucide names often invisible/missing in some themes. */
 const TOOLBAR_SVG: Record<string, string> = {
@@ -127,6 +130,8 @@ export class PyoInkView extends ItemView {
     return this.file ? `PyoInk: ${this.file.basename}` : "PyoInk";
   }
 
+  private mediaKind: InkableKind | null = null;
+
   getIcon() {
     return "pen-tool";
   }
@@ -159,15 +164,17 @@ export class PyoInkView extends ItemView {
   }
 
   async openFile(file: TFile) {
-    if (file.extension !== "md") {
+    const kind = inkableKind(file);
+    if (!kind) {
       inkLog("E_NO_MD");
-      new Notice("PyoInk: Markdown only");
+      new Notice("PyoInk: open Markdown, PDF, or an image");
       return;
     }
     await this.flushSave();
     this.teardownWatchers();
     this.state = "loading";
     this.file = file;
+    this.mediaKind = kind;
     this.dirty = false;
     this.remoteNewer = false;
     this.engine = new StrokeEngine(this.plugin.settings);
@@ -179,15 +186,20 @@ export class PyoInkView extends ItemView {
     this.syncToolbar();
     this.noteEl.empty();
 
-    // Reading-view style render so theme + MD layout match normal Obsidian.
     try {
-      const md = await this.app.vault.read(file);
-      await this.renderReadingView(md, file);
+      if (kind === "markdown") {
+        const md = await this.app.vault.read(file);
+        await this.renderReadingView(md, file);
+      } else if (kind === "image") {
+        await this.renderImageMedia(file);
+      } else {
+        await this.renderPdfMedia(file);
+      }
     } catch (e) {
       inkLog("E_RENDER", e);
       this.state = "error";
       this.noteEl.setText("(render failed)");
-      new Notice("PyoInk: markdown render failed");
+      new Notice(`PyoInk: failed to open ${kind}`);
     }
 
     const loaded = await this.store.load(file.path);
@@ -210,18 +222,11 @@ export class PyoInkView extends ItemView {
   }
 
   /**
-   * Render note like Obsidian Reading View so core/theme CSS applies
-   * (headings, lists, callouts, embeds, readable line width, etc.).
-   *
-   * DOM mirrors reading mode:
-   *   .markdown-reading-view
-   *     .markdown-preview-view.markdown-rendered.is-readable-line-width
-   *       .markdown-preview-sizer
+   * A+B: Reading-view DOM + CSS variables copied from a live Markdown leaf when present.
    */
   private async renderReadingView(md: string, file: TFile) {
     this.noteEl.empty();
-    this.noteEl.removeClass("pyoink-content-source");
-    // Outer shell = reading view (themes key off this too)
+    this.noteEl.removeClass("pyoink-content-source", "pyoink-media-host");
     this.noteEl.addClasses(["markdown-reading-view", "pyoink-reading-host"]);
 
     const preview = this.noteEl.createDiv({
@@ -235,12 +240,103 @@ export class PyoInkView extends ItemView {
         "pyoink-preview",
       ].join(" "),
     });
-    // Horizontal margins from theme; keep top small so text frame sits higher
+
+    this.applyHybridReadingStyles(preview);
+
+    const sizer = preview.createDiv({
+      cls: "markdown-preview-sizer markdown-preview-section",
+    });
+    sizer.createDiv({
+      cls: "markdown-preview-pusher",
+      attr: { style: "width: 1px; height: 0.1px; margin-bottom: 0;" },
+    });
+    await MarkdownRenderer.render(this.app, md, sizer, file.path, this);
+    this.wireInternalLinks();
+  }
+
+  /**
+   * B: Copy layout CSS variables + type metrics from an open Markdown reading/preview leaf
+   * so PyoInk column width/type match the live Obsidian note as closely as possible.
+   */
+  private applyHybridReadingStyles(preview: HTMLElement) {
+    const root = getComputedStyle(document.documentElement);
+    const body = getComputedStyle(document.body);
+    const varNames = [
+      "--file-line-width",
+      "--file-margins",
+      "--font-text-size",
+      "--font-text",
+      "--font-interface",
+      "--line-height-normal",
+      "--h1-size",
+      "--h2-size",
+      "--h3-size",
+      "--h4-size",
+      "--h5-size",
+      "--h6-size",
+      "--bold-modifier",
+      "--inline-title-size",
+      "--background-primary",
+      "--text-normal",
+      "--text-muted",
+      "--link-color",
+      "--code-normal",
+      "--code-background",
+      "--size-4-8",
+      "--size-4-4",
+    ];
+    // Prefer :root tokens, then body (themes often set either)
+    for (const name of varNames) {
+      const v = root.getPropertyValue(name).trim() || body.getPropertyValue(name).trim();
+      if (v) preview.style.setProperty(name, v);
+    }
+
+    // Live leaf: prefer actual preview metrics when a markdown view is open
     try {
-      const body = getComputedStyle(document.body);
-      const fm = body.getPropertyValue("--file-margins").trim();
-      // Prefer left/right from --file-margins when it's "V H" or "T H B"
+      for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+        const view = leaf.view;
+        if (!(view instanceof MarkdownView)) continue;
+        const live =
+          view.containerEl.querySelector(
+            ".markdown-preview-view, .markdown-source-view .cm-content",
+          ) as HTMLElement | null;
+        if (!live) continue;
+        const cs = getComputedStyle(live);
+        if (cs.fontSize) preview.style.fontSize = cs.fontSize;
+        if (cs.fontFamily) preview.style.fontFamily = cs.fontFamily;
+        if (cs.lineHeight) preview.style.lineHeight = cs.lineHeight;
+        if (cs.color) preview.style.color = cs.color;
+        for (const name of varNames) {
+          const v = cs.getPropertyValue(name).trim();
+          if (v) preview.style.setProperty(name, v);
+        }
+        // Live sizer max-width → pin --file-line-width for readable column
+        const liveSizer = view.containerEl.querySelector(
+          ".markdown-preview-sizer",
+        ) as HTMLElement | null;
+        if (liveSizer) {
+          const maxW = getComputedStyle(liveSizer).maxWidth;
+          if (maxW && maxW !== "none") {
+            preview.style.setProperty("--file-line-width", maxW);
+          }
+        }
+        // horizontal padding only; keep top small (text frame higher)
+        const padL = cs.paddingLeft || body.getPropertyValue("--size-4-8").trim() || "2rem";
+        const padR = cs.paddingRight || padL;
+        preview.style.paddingLeft = padL;
+        preview.style.paddingRight = padR;
+        break;
+      }
+    } catch {
+      /* no live leaf */
+    }
+
+    // Defaults if still empty
+    if (!preview.style.paddingLeft) {
       let side = body.getPropertyValue("--size-4-8").trim() || "2rem";
+      const fm =
+        root.getPropertyValue("--file-margins").trim() ||
+        body.getPropertyValue("--file-margins").trim();
       if (fm) {
         const parts = fm.split(/\s+/).filter(Boolean);
         if (parts.length >= 2) side = parts[1];
@@ -248,23 +344,72 @@ export class PyoInkView extends ItemView {
       }
       preview.style.paddingLeft = side;
       preview.style.paddingRight = side;
-    } catch {
-      preview.style.paddingLeft = "2rem";
-      preview.style.paddingRight = "2rem";
     }
     preview.style.paddingTop = "0.35rem";
     preview.style.paddingBottom = "7rem";
+  }
 
-    const sizer = preview.createDiv({
-      cls: "markdown-preview-sizer markdown-preview-section",
+  private async renderImageMedia(file: TFile) {
+    this.noteEl.empty();
+    this.noteEl.removeClass("markdown-reading-view", "pyoink-reading-host");
+    this.noteEl.addClasses(["pyoink-media-host", "pyoink-image-host"]);
+    const wrap = this.noteEl.createDiv({ cls: "pyoink-media-frame" });
+    const img = wrap.createEl("img", { cls: "pyoink-media-image" });
+    img.alt = file.basename;
+    img.draggable = false;
+    img.src = this.app.vault.getResourcePath(file);
+    await new Promise<void>((res) => {
+      if (img.complete) res();
+      else {
+        img.addEventListener("load", () => res(), { once: true });
+        img.addEventListener("error", () => res(), { once: true });
+      }
     });
-    // Minimal pusher — don't push content down
-    sizer.createDiv({
-      cls: "markdown-preview-pusher",
-      attr: { style: "width: 1px; height: 0.1px; margin-bottom: 0;" },
-    });
-    await MarkdownRenderer.render(this.app, md, sizer, file.path, this);
-    this.wireInternalLinks();
+  }
+
+  private async renderPdfMedia(file: TFile) {
+    this.noteEl.empty();
+    this.noteEl.removeClass("markdown-reading-view", "pyoink-reading-host");
+    this.noteEl.addClasses(["pyoink-media-host", "pyoink-pdf-host"]);
+    const stack = this.noteEl.createDiv({ cls: "pyoink-pdf-stack" });
+    const loading = stack.createDiv({ cls: "pyoink-media-loading", text: "Loading PDF…" });
+
+    const pdfjsLib = await loadPdfJs();
+    const data = await this.app.vault.readBinary(file);
+    // pdf.js expects Uint8Array
+    const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data as ArrayBuffer);
+    const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+    loading.remove();
+
+    const maxPages = Math.min(pdf.numPages || 1, 40);
+    if ((pdf.numPages || 0) > maxPages) {
+      new Notice(`PyoInk: rendering first ${maxPages} of ${pdf.numPages} PDF pages`);
+    }
+
+    // Fit width to current scroll host
+    const hostW = Math.max(280, (this.scrollEl?.clientWidth || 720) - 48);
+
+    for (let i = 1; i <= maxPages; i++) {
+      const page = await pdf.getPage(i);
+      const base = page.getViewport({ scale: 1 });
+      const scale = Math.min(2.2, hostW / Math.max(1, base.width));
+      const viewport = page.getViewport({ scale });
+      const pageWrap = stack.createDiv({ cls: "pyoink-pdf-page" });
+      const label = pageWrap.createDiv({
+        cls: "pyoink-pdf-page-label",
+        text: `Page ${i}`,
+      });
+      void label;
+      const c = pageWrap.createEl("canvas", { cls: "pyoink-pdf-page-canvas" });
+      c.width = Math.floor(viewport.width);
+      c.height = Math.floor(viewport.height);
+      c.style.width = "100%";
+      c.style.height = "auto";
+      c.style.maxWidth = `${Math.floor(viewport.width)}px`;
+      const ctx = c.getContext("2d");
+      if (!ctx) continue;
+      await page.render({ canvasContext: ctx, viewport }).promise;
+    }
   }
 
   /**
@@ -1966,7 +2111,7 @@ export class PyoInkView extends ItemView {
       snapshotAt: Date.now(),
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.4.0";
+    this.doc.meta.appVersion = "0.5.0";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new Notice("PyoInk: remote ink changed — saving local will overwrite");
@@ -2105,19 +2250,26 @@ export class PyoInkView extends ItemView {
 
     const sizer =
       this.noteEl.querySelector(".markdown-preview-sizer") as HTMLElement | null;
+    const mediaStack =
+      this.noteEl.querySelector(
+        ".pyoink-pdf-stack, .pyoink-media-frame",
+      ) as HTMLElement | null;
+    // MD: sizer column; PDF/image: media stack/frame; fallback: note host
+    const measureEl = sizer || mediaStack || this.noteEl;
     const viewportW = Math.max(1, this.scrollEl.clientWidth);
     const viewportH = Math.max(1, this.scrollEl.clientHeight);
 
-    // Natural column size from sizer only (not mixed with viewport — that caused
+    // Natural content size only (not mixed with viewport — that caused
     // width flip-flops and left-jump when centering reflowed).
     const naturalW = Math.max(
-      sizer?.scrollWidth || 0,
-      sizer?.clientWidth || 0,
+      measureEl.scrollWidth || 0,
+      measureEl.clientWidth || 0,
+      this.noteEl.scrollWidth || 0,
       1,
     );
     let naturalH = Math.max(
-      sizer?.scrollHeight || 0,
-      sizer?.clientHeight || 0,
+      measureEl.scrollHeight || 0,
+      measureEl.clientHeight || 0,
       this.noteEl.scrollHeight || 0,
       1,
     );
@@ -2126,7 +2278,7 @@ export class PyoInkView extends ItemView {
       inkLog("E_CANVAS_MAX", naturalH);
     }
 
-    // Page is always at least viewport-wide so readable column can stay centered
+    // Page is always at least viewport-wide so readable/media column can stay centered
     let w = Math.max(viewportW, naturalW);
     let h = Math.max(viewportH, naturalH + 24);
     const dpr = window.devicePixelRatio || 1;

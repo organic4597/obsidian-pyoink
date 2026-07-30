@@ -9,6 +9,7 @@ import {
   type PencilSingleTapAction,
   type PyoInkSettings,
 } from "./src/util/settings";
+import { isInkableFile } from "./src/util/media";
 
 export default class PyoInkPlugin extends Plugin {
   settings: PyoInkSettings = DEFAULT_SETTINGS;
@@ -20,23 +21,35 @@ export default class PyoInkPlugin extends Plugin {
 
     this.addCommand({
       id: "open-pyoink-current",
-      name: "Open PyoInk on current note",
+      name: "Open PyoInk on current file",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
-        if (!file || file.extension !== "md") return false;
-        if (!checking) void this.openInk(file);
+        if (!isInkableFile(file)) return false;
+        if (!checking) void this.openInk(file!);
         return true;
       },
     });
 
     this.addRibbonIcon("pen-tool", "PyoInk", async () => {
       const file = this.app.workspace.getActiveFile();
-      if (!file || file.extension !== "md") {
-        new Notice("Open a Markdown note first");
+      if (!isInkableFile(file)) {
+        new Notice("PyoInk: open a Markdown, PDF, or image file first");
         return;
       }
-      await this.openInk(file);
+      await this.openInk(file!);
     });
+
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof TFile) || !isInkableFile(file)) return;
+        menu.addItem((item) => {
+          item
+            .setTitle("Open with PyoInk")
+            .setIcon("pen-tool")
+            .onClick(() => void this.openInk(file));
+        });
+      }),
+    );
 
     this.addSettingTab(new PyoInkSettingTab(this));
   }

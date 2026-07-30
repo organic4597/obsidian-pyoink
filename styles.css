@@ -80,7 +80,8 @@
 }
 
 .pyoink-page.is-navigate .pyoink-content,
-.pyoink-page.is-navigate .pyoink-reading-host {
+.pyoink-page.is-navigate .pyoink-reading-host,
+.pyoink-page.is-navigate .pyoink-media-host {
   pointer-events: auto;
 }
 
@@ -91,6 +92,92 @@
 .pyoink-content a,
 .pyoink-reading-host a {
   cursor: pointer;
+}
+
+/* ========== PDF / image media hosts (ink overlay) ========== */
+.pyoink-media-host {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  padding: 0.75rem 1.25rem 5rem;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: transparent;
+}
+
+.pyoink-media-frame {
+  width: 100%;
+  max-width: min(100%, 960px);
+  margin: 0 auto;
+  display: flex;
+  justify-content: center;
+}
+
+.pyoink-media-image {
+  display: block;
+  max-width: 100%;
+  width: auto;
+  height: auto;
+  margin: 0 auto;
+  user-select: none;
+  -webkit-user-drag: none;
+  background: var(--background-secondary);
+  border-radius: 4px;
+  box-shadow: 0 1px 10px rgba(0, 0, 0, 0.14);
+}
+
+.pyoink-pdf-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+  width: 100%;
+  max-width: min(100%, 920px);
+  margin: 0 auto;
+}
+
+.pyoink-pdf-page {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--background-primary);
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.16);
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+}
+
+.pyoink-pdf-page-label {
+  width: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 4px 10px;
+  text-align: center;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  box-sizing: border-box;
+}
+
+.pyoink-pdf-page-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+  background: #fff;
+}
+
+.pyoink-media-loading {
+  padding: 3rem 1.5rem;
+  color: var(--text-muted);
+  text-align: center;
+  font-size: 0.95rem;
 }
 
 .pyoink-canvas {

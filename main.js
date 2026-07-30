@@ -1041,7 +1041,7 @@ function emptyDoc(source) {
       createdAt: now,
       updatedAt: now,
       appId: "pyoink",
-      appVersion: "0.3.4"
+      appVersion: "0.5.0"
     }
   };
 }
@@ -1493,6 +1493,20 @@ function sanitizeSettings(raw) {
   return s2;
 }
 
+// src/util/media.ts
+var IMAGE_EXT = /* @__PURE__ */ new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
+function inkableKind(file) {
+  if (!file) return null;
+  const ext = (file.extension || "").toLowerCase();
+  if (ext === "md" || ext === "markdown") return "markdown";
+  if (ext === "pdf") return "pdf";
+  if (IMAGE_EXT.has(ext)) return "image";
+  return null;
+}
+function isInkableFile(file) {
+  return inkableKind(file) !== null;
+}
+
 // src/view/PyoInkView.ts
 var TOOLBAR_SVG = {
   pen: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>`,
@@ -1551,6 +1565,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.panRaf = 0;
     this.panPendingX = 0;
     this.panPendingY = 0;
+    this.mediaKind = null;
     this.rgbPanelOpen = false;
     this.rgbPanelEl = null;
     this.statusChromeRaf = 0;
@@ -1591,15 +1606,17 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     if (this.raf) cancelAnimationFrame(this.raf);
   }
   async openFile(file) {
-    if (file.extension !== "md") {
+    const kind = inkableKind(file);
+    if (!kind) {
       inkLog("E_NO_MD");
-      new import_obsidian2.Notice("PyoInk: Markdown only");
+      new import_obsidian2.Notice("PyoInk: open Markdown, PDF, or an image");
       return;
     }
     await this.flushSave();
     this.teardownWatchers();
     this.state = "loading";
     this.file = file;
+    this.mediaKind = kind;
     this.dirty = false;
     this.remoteNewer = false;
     this.engine = new StrokeEngine(this.plugin.settings);
@@ -1611,13 +1628,19 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.syncToolbar();
     this.noteEl.empty();
     try {
-      const md = await this.app.vault.read(file);
-      await this.renderReadingView(md, file);
+      if (kind === "markdown") {
+        const md = await this.app.vault.read(file);
+        await this.renderReadingView(md, file);
+      } else if (kind === "image") {
+        await this.renderImageMedia(file);
+      } else {
+        await this.renderPdfMedia(file);
+      }
     } catch (e2) {
       inkLog("E_RENDER", e2);
       this.state = "error";
       this.noteEl.setText("(render failed)");
-      new import_obsidian2.Notice("PyoInk: markdown render failed");
+      new import_obsidian2.Notice(`PyoInk: failed to open ${kind}`);
     }
     const loaded = await this.store.load(file.path);
     this.doc = loaded.doc;
@@ -1637,17 +1660,11 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.rootEl.focus();
   }
   /**
-   * Render note like Obsidian Reading View so core/theme CSS applies
-   * (headings, lists, callouts, embeds, readable line width, etc.).
-   *
-   * DOM mirrors reading mode:
-   *   .markdown-reading-view
-   *     .markdown-preview-view.markdown-rendered.is-readable-line-width
-   *       .markdown-preview-sizer
+   * A+B: Reading-view DOM + CSS variables copied from a live Markdown leaf when present.
    */
   async renderReadingView(md, file) {
     this.noteEl.empty();
-    this.noteEl.removeClass("pyoink-content-source");
+    this.noteEl.removeClass("pyoink-content-source", "pyoink-media-host");
     this.noteEl.addClasses(["markdown-reading-view", "pyoink-reading-host"]);
     const preview = this.noteEl.createDiv({
       cls: [
@@ -1660,23 +1677,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         "pyoink-preview"
       ].join(" ")
     });
-    try {
-      const body = getComputedStyle(document.body);
-      const fm = body.getPropertyValue("--file-margins").trim();
-      let side = body.getPropertyValue("--size-4-8").trim() || "2rem";
-      if (fm) {
-        const parts = fm.split(/\s+/).filter(Boolean);
-        if (parts.length >= 2) side = parts[1];
-        else if (parts.length === 1) side = parts[0];
-      }
-      preview.style.paddingLeft = side;
-      preview.style.paddingRight = side;
-    } catch {
-      preview.style.paddingLeft = "2rem";
-      preview.style.paddingRight = "2rem";
-    }
-    preview.style.paddingTop = "0.35rem";
-    preview.style.paddingBottom = "7rem";
+    this.applyHybridReadingStyles(preview);
     const sizer = preview.createDiv({
       cls: "markdown-preview-sizer markdown-preview-section"
     });
@@ -1686,6 +1687,144 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     });
     await import_obsidian2.MarkdownRenderer.render(this.app, md, sizer, file.path, this);
     this.wireInternalLinks();
+  }
+  /**
+   * B: Copy layout CSS variables + type metrics from an open Markdown reading/preview leaf
+   * so PyoInk column width/type match the live Obsidian note as closely as possible.
+   */
+  applyHybridReadingStyles(preview) {
+    const root = getComputedStyle(document.documentElement);
+    const body = getComputedStyle(document.body);
+    const varNames = [
+      "--file-line-width",
+      "--file-margins",
+      "--font-text-size",
+      "--font-text",
+      "--font-interface",
+      "--line-height-normal",
+      "--h1-size",
+      "--h2-size",
+      "--h3-size",
+      "--h4-size",
+      "--h5-size",
+      "--h6-size",
+      "--bold-modifier",
+      "--inline-title-size",
+      "--background-primary",
+      "--text-normal",
+      "--text-muted",
+      "--link-color",
+      "--code-normal",
+      "--code-background",
+      "--size-4-8",
+      "--size-4-4"
+    ];
+    for (const name of varNames) {
+      const v2 = root.getPropertyValue(name).trim() || body.getPropertyValue(name).trim();
+      if (v2) preview.style.setProperty(name, v2);
+    }
+    try {
+      for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+        const view = leaf.view;
+        if (!(view instanceof import_obsidian2.MarkdownView)) continue;
+        const live = view.containerEl.querySelector(
+          ".markdown-preview-view, .markdown-source-view .cm-content"
+        );
+        if (!live) continue;
+        const cs = getComputedStyle(live);
+        if (cs.fontSize) preview.style.fontSize = cs.fontSize;
+        if (cs.fontFamily) preview.style.fontFamily = cs.fontFamily;
+        if (cs.lineHeight) preview.style.lineHeight = cs.lineHeight;
+        if (cs.color) preview.style.color = cs.color;
+        for (const name of varNames) {
+          const v2 = cs.getPropertyValue(name).trim();
+          if (v2) preview.style.setProperty(name, v2);
+        }
+        const liveSizer = view.containerEl.querySelector(
+          ".markdown-preview-sizer"
+        );
+        if (liveSizer) {
+          const maxW = getComputedStyle(liveSizer).maxWidth;
+          if (maxW && maxW !== "none") {
+            preview.style.setProperty("--file-line-width", maxW);
+          }
+        }
+        const padL = cs.paddingLeft || body.getPropertyValue("--size-4-8").trim() || "2rem";
+        const padR = cs.paddingRight || padL;
+        preview.style.paddingLeft = padL;
+        preview.style.paddingRight = padR;
+        break;
+      }
+    } catch {
+    }
+    if (!preview.style.paddingLeft) {
+      let side = body.getPropertyValue("--size-4-8").trim() || "2rem";
+      const fm = root.getPropertyValue("--file-margins").trim() || body.getPropertyValue("--file-margins").trim();
+      if (fm) {
+        const parts = fm.split(/\s+/).filter(Boolean);
+        if (parts.length >= 2) side = parts[1];
+        else if (parts.length === 1) side = parts[0];
+      }
+      preview.style.paddingLeft = side;
+      preview.style.paddingRight = side;
+    }
+    preview.style.paddingTop = "0.35rem";
+    preview.style.paddingBottom = "7rem";
+  }
+  async renderImageMedia(file) {
+    this.noteEl.empty();
+    this.noteEl.removeClass("markdown-reading-view", "pyoink-reading-host");
+    this.noteEl.addClasses(["pyoink-media-host", "pyoink-image-host"]);
+    const wrap = this.noteEl.createDiv({ cls: "pyoink-media-frame" });
+    const img = wrap.createEl("img", { cls: "pyoink-media-image" });
+    img.alt = file.basename;
+    img.draggable = false;
+    img.src = this.app.vault.getResourcePath(file);
+    await new Promise((res) => {
+      if (img.complete) res();
+      else {
+        img.addEventListener("load", () => res(), { once: true });
+        img.addEventListener("error", () => res(), { once: true });
+      }
+    });
+  }
+  async renderPdfMedia(file) {
+    this.noteEl.empty();
+    this.noteEl.removeClass("markdown-reading-view", "pyoink-reading-host");
+    this.noteEl.addClasses(["pyoink-media-host", "pyoink-pdf-host"]);
+    const stack = this.noteEl.createDiv({ cls: "pyoink-pdf-stack" });
+    const loading = stack.createDiv({ cls: "pyoink-media-loading", text: "Loading PDF\u2026" });
+    const pdfjsLib = await (0, import_obsidian2.loadPdfJs)();
+    const data = await this.app.vault.readBinary(file);
+    const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data);
+    const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+    loading.remove();
+    const maxPages = Math.min(pdf.numPages || 1, 40);
+    if ((pdf.numPages || 0) > maxPages) {
+      new import_obsidian2.Notice(`PyoInk: rendering first ${maxPages} of ${pdf.numPages} PDF pages`);
+    }
+    const hostW = Math.max(280, (this.scrollEl?.clientWidth || 720) - 48);
+    for (let i2 = 1; i2 <= maxPages; i2++) {
+      const page = await pdf.getPage(i2);
+      const base = page.getViewport({ scale: 1 });
+      const scale = Math.min(2.2, hostW / Math.max(1, base.width));
+      const viewport = page.getViewport({ scale });
+      const pageWrap = stack.createDiv({ cls: "pyoink-pdf-page" });
+      const label = pageWrap.createDiv({
+        cls: "pyoink-pdf-page-label",
+        text: `Page ${i2}`
+      });
+      void label;
+      const c2 = pageWrap.createEl("canvas", { cls: "pyoink-pdf-page-canvas" });
+      c2.width = Math.floor(viewport.width);
+      c2.height = Math.floor(viewport.height);
+      c2.style.width = "100%";
+      c2.style.height = "auto";
+      c2.style.maxWidth = `${Math.floor(viewport.width)}px`;
+      const ctx = c2.getContext("2d");
+      if (!ctx) continue;
+      await page.render({ canvasContext: ctx, viewport }).promise;
+    }
   }
   /**
    * After fonts/images/embeds settle, remeasure so ink canvas matches text layout.
@@ -3138,7 +3277,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       snapshotAt: Date.now()
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.4.0";
+    this.doc.meta.appVersion = "0.5.0";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new import_obsidian2.Notice("PyoInk: remote ink changed \u2014 saving local will overwrite");
@@ -3255,16 +3394,21 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       return;
     }
     const sizer = this.noteEl.querySelector(".markdown-preview-sizer");
+    const mediaStack = this.noteEl.querySelector(
+      ".pyoink-pdf-stack, .pyoink-media-frame"
+    );
+    const measureEl = sizer || mediaStack || this.noteEl;
     const viewportW = Math.max(1, this.scrollEl.clientWidth);
     const viewportH = Math.max(1, this.scrollEl.clientHeight);
     const naturalW = Math.max(
-      sizer?.scrollWidth || 0,
-      sizer?.clientWidth || 0,
+      measureEl.scrollWidth || 0,
+      measureEl.clientWidth || 0,
+      this.noteEl.scrollWidth || 0,
       1
     );
     let naturalH = Math.max(
-      sizer?.scrollHeight || 0,
-      sizer?.clientHeight || 0,
+      measureEl.scrollHeight || 0,
+      measureEl.clientHeight || 0,
       this.noteEl.scrollHeight || 0,
       1
     );
@@ -3345,22 +3489,30 @@ var PyoInkPlugin = class extends import_obsidian3.Plugin {
     this.registerView(VIEW_TYPE_PYOINK, (leaf) => new PyoInkView(leaf, this));
     this.addCommand({
       id: "open-pyoink-current",
-      name: "Open PyoInk on current note",
+      name: "Open PyoInk on current file",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
-        if (!file || file.extension !== "md") return false;
+        if (!isInkableFile(file)) return false;
         if (!checking) void this.openInk(file);
         return true;
       }
     });
     this.addRibbonIcon("pen-tool", "PyoInk", async () => {
       const file = this.app.workspace.getActiveFile();
-      if (!file || file.extension !== "md") {
-        new import_obsidian3.Notice("Open a Markdown note first");
+      if (!isInkableFile(file)) {
+        new import_obsidian3.Notice("PyoInk: open a Markdown, PDF, or image file first");
         return;
       }
       await this.openInk(file);
     });
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof import_obsidian3.TFile) || !isInkableFile(file)) return;
+        menu.addItem((item) => {
+          item.setTitle("Open with PyoInk").setIcon("pen-tool").onClick(() => void this.openInk(file));
+        });
+      })
+    );
     this.addSettingTab(new PyoInkSettingTab(this));
   }
   getActiveInkView() {
