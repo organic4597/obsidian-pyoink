@@ -1007,10 +1007,14 @@ export class PyoInkView extends ItemView {
     this.resetInkInputSurface();
     this.gestures.navigateMode = on;
     this.pageEl.classList.toggle("is-navigate", on);
+    this.rootEl?.classList.toggle("is-navigate", on);
     this.canvas.classList.toggle("is-pass-through", on);
     // Inline style wins over CSS if a theme/cache left canvas non-interactive
     this.canvas.style.pointerEvents = on ? "none" : "auto";
-    if (!on) this.rgbPanelOpen = false;
+    if (!on) {
+      this.rgbPanelOpen = false;
+      this.clearTextSelection();
+    }
     this.rebuildColorRow();
     this.rebuildRgbRow();
     this.rebuildWidthRow();
@@ -1024,10 +1028,27 @@ export class PyoInkView extends ItemView {
     this.gestures.setTool(t);
     this.gestures.navigateMode = false;
     this.pageEl.classList.remove("is-navigate");
+    this.rootEl?.classList.remove("is-navigate");
     this.canvas.classList.remove("is-pass-through");
     this.canvas.style.pointerEvents = "auto";
+    this.clearTextSelection();
     this.syncToolbar();
     this.updateCanvasCursor();
+  }
+
+  /** Drop any OS/Obsidian text selection so Pencil drag never highlights notes. */
+  private clearTextSelection() {
+    try {
+      const sel = window.getSelection?.();
+      if (sel && sel.rangeCount > 0) sel.removeAllRanges();
+    } catch {
+      /* */
+    }
+  }
+
+  private setPenInkingUi(on: boolean) {
+    this.rootEl?.classList.toggle("is-pen-inking", on);
+    if (on) this.clearTextSelection();
   }
 
   private bindToolbarDrag(handle: HTMLElement) {
@@ -1574,6 +1595,23 @@ export class PyoInkView extends ItemView {
     // pointerdown when canvas capture was released between short strokes.
     const penSurface: HTMLElement = this.rootEl;
 
+    // Block native text selection / drag while inking (not navigate mode)
+    const blockSelect = (ev: Event) => {
+      if (this.gestures.navigateMode) return;
+      ev.preventDefault();
+    };
+    penSurface.addEventListener("selectstart", blockSelect, { capture: true });
+    penSurface.addEventListener("dragstart", blockSelect, { capture: true });
+    // iPadOS sometimes starts selection on long-press context menu path
+    penSurface.addEventListener(
+      "contextmenu",
+      (ev) => {
+        if (this.gestures.navigateMode) return;
+        ev.preventDefault();
+      },
+      { capture: true },
+    );
+
     const stopFling = () => {
       if (this.flingRaf) {
         cancelAnimationFrame(this.flingRaf);
@@ -1699,6 +1737,8 @@ export class PyoInkView extends ItemView {
 
     const startPenInk = (ev: PointerEvent, rect: DOMRect) => {
       if (this.gestures.navigateMode) return false;
+      this.setPenInkingUi(true);
+      this.clearTextSelection();
       if (
         this.scrollTouchId != null ||
         this.flingRaf ||
@@ -1788,7 +1828,10 @@ export class PyoInkView extends ItemView {
     };
     const onPenUpCapture = (ev: PointerEvent) => {
       if (ev.pointerType !== "pen") return;
-      if (!this.engine.isStroking() && !this.gestures.isDrawing()) return;
+      if (!this.engine.isStroking() && !this.gestures.isDrawing()) {
+        this.setPenInkingUi(false);
+        return;
+      }
       const rect = canvasRect();
       if (this.gestures.getActiveDrawId() !== ev.pointerId) {
         this.gestures.bindPenForEnd(ev.pointerId);
@@ -1802,6 +1845,8 @@ export class PyoInkView extends ItemView {
           this.handleGesture({ type: "draw-end", pointerId: ev.pointerId }, ev, rect);
         }
       }
+      this.setPenInkingUi(false);
+      this.clearTextSelection();
     };
 
     penSurface.addEventListener("pointerdown", onPenDownCapture, { capture: true });
@@ -2310,6 +2355,8 @@ export class PyoInkView extends ItemView {
         const changed = this.engine.end();
         this.state = "ready";
         this.gestures.clearActiveDraw();
+        if (ev.pointerType === "pen") this.setPenInkingUi(false);
+        this.clearTextSelection();
         // Keep capture if possible so the next jamo's events stay on canvas;
         // browser still releases on pointerup, but try not to force early release races.
         try {
@@ -2429,7 +2476,7 @@ export class PyoInkView extends ItemView {
       snapshotAt: Date.now(),
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.5.7";
+    this.doc.meta.appVersion = "0.5.8";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new Notice("PyoInk: remote ink changed — saving local will overwrite");

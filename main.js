@@ -1159,7 +1159,7 @@ function emptyDoc(source) {
       createdAt: now,
       updatedAt: now,
       appId: "pyoink",
-      appVersion: "0.5.7"
+      appVersion: "0.5.8"
     }
   };
 }
@@ -2472,9 +2472,13 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.resetInkInputSurface();
     this.gestures.navigateMode = on;
     this.pageEl.classList.toggle("is-navigate", on);
+    this.rootEl?.classList.toggle("is-navigate", on);
     this.canvas.classList.toggle("is-pass-through", on);
     this.canvas.style.pointerEvents = on ? "none" : "auto";
-    if (!on) this.rgbPanelOpen = false;
+    if (!on) {
+      this.rgbPanelOpen = false;
+      this.clearTextSelection();
+    }
     this.rebuildColorRow();
     this.rebuildRgbRow();
     this.rebuildWidthRow();
@@ -2487,10 +2491,24 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.gestures.setTool(t2);
     this.gestures.navigateMode = false;
     this.pageEl.classList.remove("is-navigate");
+    this.rootEl?.classList.remove("is-navigate");
     this.canvas.classList.remove("is-pass-through");
     this.canvas.style.pointerEvents = "auto";
+    this.clearTextSelection();
     this.syncToolbar();
     this.updateCanvasCursor();
+  }
+  /** Drop any OS/Obsidian text selection so Pencil drag never highlights notes. */
+  clearTextSelection() {
+    try {
+      const sel = window.getSelection?.();
+      if (sel && sel.rangeCount > 0) sel.removeAllRanges();
+    } catch {
+    }
+  }
+  setPenInkingUi(on) {
+    this.rootEl?.classList.toggle("is-pen-inking", on);
+    if (on) this.clearTextSelection();
   }
   bindToolbarDrag(handle) {
     let dragging = false;
@@ -2954,6 +2972,20 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   bindPointer() {
     const c2 = this.canvas;
     const penSurface = this.rootEl;
+    const blockSelect = (ev) => {
+      if (this.gestures.navigateMode) return;
+      ev.preventDefault();
+    };
+    penSurface.addEventListener("selectstart", blockSelect, { capture: true });
+    penSurface.addEventListener("dragstart", blockSelect, { capture: true });
+    penSurface.addEventListener(
+      "contextmenu",
+      (ev) => {
+        if (this.gestures.navigateMode) return;
+        ev.preventDefault();
+      },
+      { capture: true }
+    );
     const stopFling = () => {
       if (this.flingRaf) {
         cancelAnimationFrame(this.flingRaf);
@@ -3061,6 +3093,8 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     const canvasRect = () => c2.getBoundingClientRect();
     const startPenInk = (ev, rect) => {
       if (this.gestures.navigateMode) return false;
+      this.setPenInkingUi(true);
+      this.clearTextSelection();
       if (this.scrollTouchId != null || this.flingRaf || this.panRaf || this.canvas.classList.contains("is-pass-through")) {
         stopFling();
         this.killPalmPanForPen(ev);
@@ -3136,7 +3170,10 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     };
     const onPenUpCapture = (ev) => {
       if (ev.pointerType !== "pen") return;
-      if (!this.engine.isStroking() && !this.gestures.isDrawing()) return;
+      if (!this.engine.isStroking() && !this.gestures.isDrawing()) {
+        this.setPenInkingUi(false);
+        return;
+      }
       const rect = canvasRect();
       if (this.gestures.getActiveDrawId() !== ev.pointerId) {
         this.gestures.bindPenForEnd(ev.pointerId);
@@ -3150,6 +3187,8 @@ var PyoInkView = class extends import_obsidian2.ItemView {
           this.handleGesture({ type: "draw-end", pointerId: ev.pointerId }, ev, rect);
         }
       }
+      this.setPenInkingUi(false);
+      this.clearTextSelection();
     };
     penSurface.addEventListener("pointerdown", onPenDownCapture, { capture: true });
     penSurface.addEventListener("pointermove", onPenMoveCapture, { capture: true });
@@ -3554,6 +3593,8 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         const changed = this.engine.end();
         this.state = "ready";
         this.gestures.clearActiveDraw();
+        if (ev.pointerType === "pen") this.setPenInkingUi(false);
+        this.clearTextSelection();
         try {
           this.canvas.releasePointerCapture(ev.pointerId);
         } catch {
@@ -3658,7 +3699,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       snapshotAt: Date.now()
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.5.7";
+    this.doc.meta.appVersion = "0.5.8";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new import_obsidian2.Notice("PyoInk: remote ink changed \u2014 saving local will overwrite");

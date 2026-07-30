@@ -7,6 +7,25 @@
   background: var(--background-primary);
   outline: none;
   touch-action: none;
+  /* Never select note text while inking (Pencil drag ≠ text selection) */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-user-drag: none;
+}
+
+.pyoink-root.is-pen-inking,
+.pyoink-root.is-pen-inking * {
+  -webkit-user-select: none !important;
+  user-select: none !important;
+  caret-color: transparent !important;
+}
+
+/* Allow text selection only in navigate mode (link/read) */
+.pyoink-root.is-navigate .pyoink-reading-host,
+.pyoink-root.is-navigate .pyoink-content {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .pyoink-scroll {
@@ -189,6 +208,9 @@
   pointer-events: auto;
   background: transparent;
   cursor: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .pyoink-canvas.is-pass-through {
