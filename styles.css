@@ -568,26 +568,9 @@
 
 .pyoink-width-slider {
   flex: 1;
-  min-width: 100px;
+  min-width: 80px;
   height: 28px;
   accent-color: var(--interactive-accent);
-}
-
-.pyoink-width-step {
-  width: 32px !important;
-  height: 32px !important;
-  min-width: 32px !important;
-  border-radius: 10px !important;
-  font-size: 18px !important;
-  font-weight: 700 !important;
-  line-height: 1 !important;
-  background: var(--background-modifier-border) !important;
-  color: var(--text-normal) !important;
-}
-
-.pyoink-width-step:active {
-  background: var(--interactive-accent) !important;
-  color: var(--text-on-accent, #fff) !important;
 }
 
 .pyoink-width-val {
@@ -596,6 +579,7 @@
   color: var(--text-normal);
   min-width: 28px;
   text-align: right;
+  flex-shrink: 0;
 }
 
 .pyoink-toolbar button[disabled] {
@@ -617,12 +601,20 @@
 .pyoink-status.is-saved { color: var(--text-muted); }
 .pyoink-status.is-dirty { color: var(--text-warning, #d4a017); }
 .pyoink-status.is-saving { color: var(--interactive-accent); }
+button.pyoink-zoom-badge,
 .pyoink-zoom-badge {
-  font-size: 11px;
-  font-weight: 700;
-  min-width: 36px;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  min-width: 40px !important;
+  width: auto !important;
+  padding: 0 6px !important;
   text-align: center;
-  color: var(--text-muted);
-  padding: 0 4px;
+  color: var(--text-muted) !important;
+  letter-spacing: -0.02em;
   user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+button.pyoink-zoom-badge:active {
+  color: var(--text-normal) !important;
 }

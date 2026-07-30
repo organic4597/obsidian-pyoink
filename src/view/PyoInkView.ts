@@ -136,6 +136,13 @@ export class PyoInkView extends ItemView {
     return "pen-tool";
   }
 
+  /** Settings tab changed stroke feel — pick up without reopening. */
+  refreshStrokeSettings() {
+    this.engine.setSettings(this.plugin.settings);
+    this.cacheValid = false;
+    this.requestRedraw();
+  }
+
   async onOpen() {
     const container = this.containerEl.children[1] as HTMLElement;
     container.empty();
@@ -527,15 +534,16 @@ export class PyoInkView extends ItemView {
     const zOut = tools.createEl("button", { cls: "pyoink-tb-icon", text: "−" });
     zOut.title = "Zoom out";
     zOut.onclick = () => this.bumpZoom(1 / 1.15);
-    const zReset = tools.createEl("button", { cls: "pyoink-tb-icon", text: "1×" });
-    zReset.title = "Reset zoom";
-    zReset.onclick = () => this.setZoom(1);
+    // Live zoom readout (was static "1×") — tap resets to 100%
+    this.zoomBadgeEl = tools.createEl("button", {
+      cls: "pyoink-tb-icon pyoink-zoom-badge",
+      text: "1×",
+    });
+    this.zoomBadgeEl.title = "Current zoom — tap to reset";
+    this.zoomBadgeEl.onclick = () => this.setZoom(1);
     const zIn = tools.createEl("button", { cls: "pyoink-tb-icon", text: "+" });
     zIn.title = "Zoom in";
     zIn.onclick = () => this.bumpZoom(1.15);
-
-    this.zoomBadgeEl = tools.createSpan({ cls: "pyoink-zoom-badge", text: "100%" });
-    this.zoomBadgeEl.title = "Current zoom";
 
     const exit = tools.createEl("button", { cls: "pyoink-tb-icon" });
     exit.title = "Leave (save on exit)";
@@ -877,12 +885,7 @@ export class PyoInkView extends ItemView {
       cls: "pyoink-width-label",
     });
 
-    const minus = this.widthRowEl.createEl("button", {
-      text: "−",
-      cls: "pyoink-width-step",
-    });
-    minus.title = "Thinner";
-
+    // Slider only (no −/+) — cleaner left rail alignment
     const range = this.widthRowEl.createEl("input", {
       type: "range",
       cls: "pyoink-width-slider",
@@ -892,12 +895,6 @@ export class PyoInkView extends ItemView {
     range.step = "1";
     range.value = String(idx);
     range.title = `${toolLabel} size (7 steps)`;
-
-    const plus = this.widthRowEl.createEl("button", {
-      text: "+",
-      cls: "pyoink-width-step",
-    });
-    plus.title = "Thicker";
 
     const val = this.widthRowEl.createSpan({
       text: `${idx + 1}/7`,
@@ -918,14 +915,6 @@ export class PyoInkView extends ItemView {
       this.requestRedraw();
     };
     range.oninput = () => applyW(Number(range.value));
-    minus.onclick = (ev) => {
-      ev.preventDefault();
-      applyW(Number(range.value) - 1);
-    };
-    plus.onclick = (ev) => {
-      ev.preventDefault();
-      applyW(Number(range.value) + 1);
-    };
   }
 
   private rgbPanelOpen = false;
@@ -1595,6 +1584,20 @@ export class PyoInkView extends ItemView {
       return true;
     };
 
+    /** End finger pan UI only — keep fingerIds so 2nd finger can start pinch. */
+    const endPanUiOnly = (reason: string) => {
+      if (this.scrollTouchId == null) return;
+      this.scrollTouchId = null;
+      stopFling();
+      if (this.panRaf) {
+        cancelAnimationFrame(this.panRaf);
+        this.panRaf = 0;
+        this.panPendingX = 0;
+        this.panPendingY = 0;
+      }
+      inkLog("E_SCROLL_TO_PINCH", reason);
+    };
+
     const forceClearScroll = (reason: string) => {
       if (this.scrollTouchId == null) return;
       const id = this.scrollTouchId;
@@ -1625,11 +1628,20 @@ export class PyoInkView extends ItemView {
       // navigate: non-pen falls through
       if (this.gestures.navigateMode && ev.pointerType !== "pen") return;
 
-      if (this.scrollTouchId != null && this.scrollTouchId !== ev.pointerId) {
+      // 2nd finger while panning: stop pan UI but KEEP first finger tracked → pinch works
+      if (
+        this.scrollTouchId != null &&
+        this.scrollTouchId !== ev.pointerId &&
+        ev.pointerType === "touch"
+      ) {
+        endPanUiOnly("second_finger");
+      } else if (this.scrollTouchId != null && this.scrollTouchId !== ev.pointerId) {
         forceClearScroll("new_pointer_down");
       }
 
       const rect = c.getBoundingClientRect();
+      // Keep first finger position fresh for pinch distance
+      this.gestures.notePointer(ev);
       const action = this.gestures.onDown(ev, rect);
       if (action.type === "scroll" && (ev.pointerType === "touch" || ev.pointerType === "mouse")) {
         stopFling();
@@ -1649,11 +1661,28 @@ export class PyoInkView extends ItemView {
         ev.preventDefault();
         return;
       }
+      if (action.type === "pinch") {
+        try {
+          c.setPointerCapture(ev.pointerId);
+        } catch {
+          /* */
+        }
+      }
       this.handleGesture(action, ev, rect);
     });
 
     c.addEventListener("pointermove", (ev) => {
-      if (this.scrollTouchId === ev.pointerId) {
+      // Always refresh touch coords so pinch startDist is accurate
+      if (ev.pointerType === "touch") this.gestures.notePointer(ev);
+
+      // Mid-pan second finger already down → switch this finger to pinch path
+      if (
+        this.scrollTouchId === ev.pointerId &&
+        (this.gestures.getFingerCount() >= 2 || this.gestures.isPinching())
+      ) {
+        endPanUiOnly("move_while_multi");
+        // fall through to gesture/pinch
+      } else if (this.scrollTouchId === ev.pointerId) {
         const samples =
           typeof ev.getCoalescedEvents === "function" && ev.getCoalescedEvents().length
             ? ev.getCoalescedEvents()
@@ -2111,7 +2140,7 @@ export class PyoInkView extends ItemView {
       snapshotAt: Date.now(),
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.5.0";
+    this.doc.meta.appVersion = "0.5.1";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new Notice("PyoInk: remote ink changed — saving local will overwrite");
@@ -2141,8 +2170,15 @@ export class PyoInkView extends ItemView {
       }
     }
     if (this.zoomBadgeEl) {
-      const pct = Math.round((this.viewZoom || 1) * 100);
-      this.zoomBadgeEl.setText(`${pct}%`);
+      const z = this.viewZoom || 1;
+      // Compact GoodNotes-style label: 1× / 1.5× / 2×
+      let label: string;
+      if (Math.abs(z - 1) < 0.02) label = "1×";
+      else if (z >= 10) label = `${Math.round(z)}×`;
+      else if (Math.abs(z * 10 - Math.round(z * 10)) < 0.05) label = `${(Math.round(z * 10) / 10).toFixed(1)}×`;
+      else label = `${z.toFixed(2)}×`;
+      this.zoomBadgeEl.setText(label);
+      this.zoomBadgeEl.title = `Zoom ${Math.round(z * 100)}% — tap to reset`;
     }
   }
 

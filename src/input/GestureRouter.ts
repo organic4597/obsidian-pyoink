@@ -86,6 +86,27 @@ export class GestureRouter {
     return this.viewZoom;
   }
 
+  /** Active touch finger count (for pinch vs pan). */
+  getFingerCount(): number {
+    return this.fingerIds.size;
+  }
+
+  /** True while a two-finger pinch session is active. */
+  isPinching(): boolean {
+    return this.pinch != null;
+  }
+
+  /**
+   * Update pointer map without side effects (scroll path must keep positions
+   * fresh so pinch startDist uses current finger locations).
+   */
+  notePointer(ev: PointerEvent) {
+    this.pointers.set(ev.pointerId, ev);
+    if (ev.pointerType === "touch") {
+      this.fingerIds.add(ev.pointerId);
+    }
+  }
+
   setTool(t: InkTool) {
     this.tool = t;
   }
@@ -589,14 +610,16 @@ export class GestureRouter {
     const pair = this.touchPair();
     if (!pair) return null;
     const dist = Math.hypot(pair.a.clientX - pair.b.clientX, pair.a.clientY - pair.b.clientY);
-    if (dist < 8) return null;
+    // Allow closer fingers (thumb+index on phone/iPad)
+    if (dist < 4) return null;
     const ids = Array.from(this.fingerIds);
     this.pinch = {
       idA: ids[0],
       idB: ids[1],
-      startDist: dist,
+      startDist: Math.max(dist, 1),
       startZoom: this.viewZoom,
     };
+    this.lastPinchAt = performance.now();
     return {
       type: "pinch",
       scale: this.viewZoom,
@@ -610,20 +633,39 @@ export class GestureRouter {
     const pair = this.touchPair();
     if (!pair) return null;
     const dist = Math.hypot(pair.a.clientX - pair.b.clientX, pair.a.clientY - pair.b.clientY);
-    if (dist < 8) return null;
+    if (dist < 4) return null;
     if (!this.pinch) {
       const ids = Array.from(this.fingerIds);
       this.pinch = {
         idA: ids[0],
         idB: ids[1],
-        startDist: dist,
+        startDist: Math.max(dist, 1),
+        startZoom: this.viewZoom,
+      };
+    }
+    // If pair changed (finger lift/re-press), re-anchor so zoom doesn't jump
+    const ids = Array.from(this.fingerIds);
+    if (
+      this.pinch.idA !== ids[0] ||
+      this.pinch.idB !== ids[1] ||
+      !this.pointers.has(this.pinch.idA) ||
+      !this.pointers.has(this.pinch.idB)
+    ) {
+      this.pinch = {
+        idA: ids[0],
+        idB: ids[1],
+        startDist: Math.max(dist, 1),
         startZoom: this.viewZoom,
       };
     }
     const factor = dist / Math.max(1, this.pinch.startDist);
-    const next = this.pinch.startZoom * factor;
+    // Gentle clamp on single-frame jumps (noise / palm)
+    const next = this.pinch.startZoom * Math.min(4, Math.max(0.15, factor));
     // Mark multi-finger as "moved" so short-tap shortcuts don't fire after pinch
-    this.multiFingerMaxMove = Math.max(this.multiFingerMaxMove, Math.abs(dist - this.pinch.startDist));
+    this.multiFingerMaxMove = Math.max(
+      this.multiFingerMaxMove,
+      Math.abs(dist - this.pinch.startDist),
+    );
     this.lastPinchAt = performance.now();
     return {
       type: "pinch",

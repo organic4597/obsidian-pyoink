@@ -578,6 +578,24 @@ var GestureRouter = class {
   getViewZoom() {
     return this.viewZoom;
   }
+  /** Active touch finger count (for pinch vs pan). */
+  getFingerCount() {
+    return this.fingerIds.size;
+  }
+  /** True while a two-finger pinch session is active. */
+  isPinching() {
+    return this.pinch != null;
+  }
+  /**
+   * Update pointer map without side effects (scroll path must keep positions
+   * fresh so pinch startDist uses current finger locations).
+   */
+  notePointer(ev) {
+    this.pointers.set(ev.pointerId, ev);
+    if (ev.pointerType === "touch") {
+      this.fingerIds.add(ev.pointerId);
+    }
+  }
   setTool(t2) {
     this.tool = t2;
   }
@@ -962,14 +980,15 @@ var GestureRouter = class {
     const pair = this.touchPair();
     if (!pair) return null;
     const dist = Math.hypot(pair.a.clientX - pair.b.clientX, pair.a.clientY - pair.b.clientY);
-    if (dist < 8) return null;
+    if (dist < 4) return null;
     const ids = Array.from(this.fingerIds);
     this.pinch = {
       idA: ids[0],
       idB: ids[1],
-      startDist: dist,
+      startDist: Math.max(dist, 1),
       startZoom: this.viewZoom
     };
+    this.lastPinchAt = performance.now();
     return {
       type: "pinch",
       scale: this.viewZoom,
@@ -982,19 +1001,31 @@ var GestureRouter = class {
     const pair = this.touchPair();
     if (!pair) return null;
     const dist = Math.hypot(pair.a.clientX - pair.b.clientX, pair.a.clientY - pair.b.clientY);
-    if (dist < 8) return null;
+    if (dist < 4) return null;
     if (!this.pinch) {
-      const ids = Array.from(this.fingerIds);
+      const ids2 = Array.from(this.fingerIds);
+      this.pinch = {
+        idA: ids2[0],
+        idB: ids2[1],
+        startDist: Math.max(dist, 1),
+        startZoom: this.viewZoom
+      };
+    }
+    const ids = Array.from(this.fingerIds);
+    if (this.pinch.idA !== ids[0] || this.pinch.idB !== ids[1] || !this.pointers.has(this.pinch.idA) || !this.pointers.has(this.pinch.idB)) {
       this.pinch = {
         idA: ids[0],
         idB: ids[1],
-        startDist: dist,
+        startDist: Math.max(dist, 1),
         startZoom: this.viewZoom
       };
     }
     const factor = dist / Math.max(1, this.pinch.startDist);
-    const next = this.pinch.startZoom * factor;
-    this.multiFingerMaxMove = Math.max(this.multiFingerMaxMove, Math.abs(dist - this.pinch.startDist));
+    const next = this.pinch.startZoom * Math.min(4, Math.max(0.15, factor));
+    this.multiFingerMaxMove = Math.max(
+      this.multiFingerMaxMove,
+      Math.abs(dist - this.pinch.startDist)
+    );
     this.lastPinchAt = performance.now();
     return {
       type: "pinch",
@@ -1041,7 +1072,7 @@ function emptyDoc(source) {
       createdAt: now,
       updatedAt: now,
       appId: "pyoink",
-      appVersion: "0.5.0"
+      appVersion: "0.5.1"
     }
   };
 }
@@ -1411,9 +1442,11 @@ var DEFAULT_SETTINGS = {
   palmRejectMs: 700,
   simulatePressureFallback: true,
   pressureGain: 1.2,
-  pfSmoothing: 0.5,
+  /** Outline smoothing (perfect-freehand). Higher = smoother stroke edges. */
+  pfSmoothing: 0.68,
   pfThinning: 0.5,
-  pfStreamline: 0.5,
+  /** Input streamline — averages points while drawing (GoodNotes-like stabilise). */
+  pfStreamline: 0.72,
   debounceMs: 12e3,
   maxCanvasCssHeight: 8192,
   undoLimit: 50,
@@ -1439,6 +1472,12 @@ function sanitizeSettings(raw) {
   );
   s2.eraserWidth = snapWidth("eraser", clamp(Number(s2.eraserWidth), 8, 120));
   s2.pressureGain = clamp(Number(s2.pressureGain), 0.3, 3);
+  const rawSm = Number(raw?.pfSmoothing);
+  const rawSl = Number(raw?.pfStreamline);
+  if (rawSm === 0.5 && rawSl === 0.5) {
+    s2.pfSmoothing = 0.68;
+    s2.pfStreamline = 0.72;
+  }
   s2.pfSmoothing = clamp(Number(s2.pfSmoothing), 0, 0.95);
   s2.pfThinning = clamp(Number(s2.pfThinning), -0.99, 0.99);
   s2.pfStreamline = clamp(Number(s2.pfStreamline), 0, 0.99);
@@ -1581,6 +1620,12 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   getIcon() {
     return "pen-tool";
+  }
+  /** Settings tab changed stroke feel — pick up without reopening. */
+  refreshStrokeSettings() {
+    this.engine.setSettings(this.plugin.settings);
+    this.cacheValid = false;
+    this.requestRedraw();
   }
   async onOpen() {
     const container = this.containerEl.children[1];
@@ -1924,14 +1969,15 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     const zOut = tools.createEl("button", { cls: "pyoink-tb-icon", text: "\u2212" });
     zOut.title = "Zoom out";
     zOut.onclick = () => this.bumpZoom(1 / 1.15);
-    const zReset = tools.createEl("button", { cls: "pyoink-tb-icon", text: "1\xD7" });
-    zReset.title = "Reset zoom";
-    zReset.onclick = () => this.setZoom(1);
+    this.zoomBadgeEl = tools.createEl("button", {
+      cls: "pyoink-tb-icon pyoink-zoom-badge",
+      text: "1\xD7"
+    });
+    this.zoomBadgeEl.title = "Current zoom \u2014 tap to reset";
+    this.zoomBadgeEl.onclick = () => this.setZoom(1);
     const zIn = tools.createEl("button", { cls: "pyoink-tb-icon", text: "+" });
     zIn.title = "Zoom in";
     zIn.onclick = () => this.bumpZoom(1.15);
-    this.zoomBadgeEl = tools.createSpan({ cls: "pyoink-zoom-badge", text: "100%" });
-    this.zoomBadgeEl.title = "Current zoom";
     const exit = tools.createEl("button", { cls: "pyoink-tb-icon" });
     exit.title = "Leave (save on exit)";
     this.setSvgIcon(exit, "exit");
@@ -2222,11 +2268,6 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       text: `${toolLabel}`,
       cls: "pyoink-width-label"
     });
-    const minus = this.widthRowEl.createEl("button", {
-      text: "\u2212",
-      cls: "pyoink-width-step"
-    });
-    minus.title = "Thinner";
     const range = this.widthRowEl.createEl("input", {
       type: "range",
       cls: "pyoink-width-slider"
@@ -2236,11 +2277,6 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     range.step = "1";
     range.value = String(idx);
     range.title = `${toolLabel} size (7 steps)`;
-    const plus = this.widthRowEl.createEl("button", {
-      text: "+",
-      cls: "pyoink-width-step"
-    });
-    plus.title = "Thicker";
     const val = this.widthRowEl.createSpan({
       text: `${idx + 1}/7`,
       cls: "pyoink-width-val"
@@ -2259,14 +2295,6 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       this.requestRedraw();
     };
     range.oninput = () => applyW(Number(range.value));
-    minus.onclick = (ev) => {
-      ev.preventDefault();
-      applyW(Number(range.value) - 1);
-    };
-    plus.onclick = (ev) => {
-      ev.preventDefault();
-      applyW(Number(range.value) + 1);
-    };
   }
   finishStrokeIfNeeded() {
     if (!this.engine.isStroking()) return;
@@ -2835,6 +2863,18 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       }
       return true;
     };
+    const endPanUiOnly = (reason) => {
+      if (this.scrollTouchId == null) return;
+      this.scrollTouchId = null;
+      stopFling();
+      if (this.panRaf) {
+        cancelAnimationFrame(this.panRaf);
+        this.panRaf = 0;
+        this.panPendingX = 0;
+        this.panPendingY = 0;
+      }
+      inkLog("E_SCROLL_TO_PINCH", reason);
+    };
     const forceClearScroll = (reason) => {
       if (this.scrollTouchId == null) return;
       const id = this.scrollTouchId;
@@ -2861,10 +2901,13 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         return;
       }
       if (this.gestures.navigateMode && ev.pointerType !== "pen") return;
-      if (this.scrollTouchId != null && this.scrollTouchId !== ev.pointerId) {
+      if (this.scrollTouchId != null && this.scrollTouchId !== ev.pointerId && ev.pointerType === "touch") {
+        endPanUiOnly("second_finger");
+      } else if (this.scrollTouchId != null && this.scrollTouchId !== ev.pointerId) {
         forceClearScroll("new_pointer_down");
       }
       const rect = c2.getBoundingClientRect();
+      this.gestures.notePointer(ev);
       const action = this.gestures.onDown(ev, rect);
       if (action.type === "scroll" && (ev.pointerType === "touch" || ev.pointerType === "mouse")) {
         stopFling();
@@ -2883,10 +2926,19 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         ev.preventDefault();
         return;
       }
+      if (action.type === "pinch") {
+        try {
+          c2.setPointerCapture(ev.pointerId);
+        } catch {
+        }
+      }
       this.handleGesture(action, ev, rect);
     });
     c2.addEventListener("pointermove", (ev) => {
-      if (this.scrollTouchId === ev.pointerId) {
+      if (ev.pointerType === "touch") this.gestures.notePointer(ev);
+      if (this.scrollTouchId === ev.pointerId && (this.gestures.getFingerCount() >= 2 || this.gestures.isPinching())) {
+        endPanUiOnly("move_while_multi");
+      } else if (this.scrollTouchId === ev.pointerId) {
         const samples = typeof ev.getCoalescedEvents === "function" && ev.getCoalescedEvents().length ? ev.getCoalescedEvents() : [ev];
         let lx = this.lastScrollX;
         let ly = this.lastScrollY;
@@ -3277,7 +3329,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       snapshotAt: Date.now()
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.5.0";
+    this.doc.meta.appVersion = "0.5.1";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new import_obsidian2.Notice("PyoInk: remote ink changed \u2014 saving local will overwrite");
@@ -3305,8 +3357,14 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       }
     }
     if (this.zoomBadgeEl) {
-      const pct = Math.round((this.viewZoom || 1) * 100);
-      this.zoomBadgeEl.setText(`${pct}%`);
+      const z = this.viewZoom || 1;
+      let label;
+      if (Math.abs(z - 1) < 0.02) label = "1\xD7";
+      else if (z >= 10) label = `${Math.round(z)}\xD7`;
+      else if (Math.abs(z * 10 - Math.round(z * 10)) < 0.05) label = `${(Math.round(z * 10) / 10).toFixed(1)}\xD7`;
+      else label = `${z.toFixed(2)}\xD7`;
+      this.zoomBadgeEl.setText(label);
+      this.zoomBadgeEl.title = `Zoom ${Math.round(z * 100)}% \u2014 tap to reset`;
     }
   }
   async reloadFromDisk() {
@@ -3597,6 +3655,27 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.settings = sanitizeSettings(this.plugin.settings);
         await this.plugin.saveSettings();
         this.display();
+      })
+    );
+    containerEl.createEl("h3", { text: "Stroke stabilisation" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "Higher values feel more like GoodNotes (smoother, slightly laggy). Lower = more raw / responsive."
+    });
+    new import_obsidian3.Setting(containerEl).setName("Input streamline").setDesc("Averages pointer samples while you draw (main stabiliser).").addSlider(
+      (s2) => s2.setLimits(0.2, 0.92, 0.02).setValue(this.plugin.settings.pfStreamline ?? 0.72).setDynamicTooltip().onChange(async (v2) => {
+        this.plugin.settings.pfStreamline = v2;
+        this.plugin.settings = sanitizeSettings(this.plugin.settings);
+        await this.plugin.saveSettings();
+        this.plugin.getActiveInkView()?.refreshStrokeSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Outline smoothing").setDesc("Smooths the rendered stroke edge after points are collected.").addSlider(
+      (s2) => s2.setLimits(0.2, 0.9, 0.02).setValue(this.plugin.settings.pfSmoothing ?? 0.68).setDynamicTooltip().onChange(async (v2) => {
+        this.plugin.settings.pfSmoothing = v2;
+        this.plugin.settings = sanitizeSettings(this.plugin.settings);
+        await this.plugin.saveSettings();
+        this.plugin.getActiveInkView()?.refreshStrokeSettings();
       })
     );
     containerEl.createEl("h3", { text: "Zoom" });

@@ -176,9 +176,11 @@ export const DEFAULT_SETTINGS: PyoInkSettings = {
   palmRejectMs: 700,
   simulatePressureFallback: true,
   pressureGain: 1.2,
-  pfSmoothing: 0.5,
+  /** Outline smoothing (perfect-freehand). Higher = smoother stroke edges. */
+  pfSmoothing: 0.68,
   pfThinning: 0.5,
-  pfStreamline: 0.5,
+  /** Input streamline — averages points while drawing (GoodNotes-like stabilise). */
+  pfStreamline: 0.72,
   debounceMs: 12000,
   maxCanvasCssHeight: 8192,
   undoLimit: 50,
@@ -205,6 +207,13 @@ export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined
   );
   s.eraserWidth = snapWidth("eraser", clamp(Number(s.eraserWidth), 8, 120));
   s.pressureGain = clamp(Number(s.pressureGain), 0.3, 3);
+  // One-shot migrate stock 0.5/0.5 → stronger stabilise (0.5.1)
+  const rawSm = Number((raw as PyoInkSettings | null | undefined)?.pfSmoothing);
+  const rawSl = Number((raw as PyoInkSettings | null | undefined)?.pfStreamline);
+  if (rawSm === 0.5 && rawSl === 0.5) {
+    s.pfSmoothing = 0.68;
+    s.pfStreamline = 0.72;
+  }
   s.pfSmoothing = clamp(Number(s.pfSmoothing), 0, 0.95);
   s.pfThinning = clamp(Number(s.pfThinning), -0.99, 0.99);
   s.pfStreamline = clamp(Number(s.pfStreamline), 0, 0.99);

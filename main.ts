@@ -162,6 +162,43 @@ class PyoInkSettingTab extends PluginSettingTab {
           }),
       );
 
+    // ——— Stroke feel ———
+    containerEl.createEl("h3", { text: "Stroke stabilisation" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "Higher values feel more like GoodNotes (smoother, slightly laggy). Lower = more raw / responsive.",
+    });
+    new Setting(containerEl)
+      .setName("Input streamline")
+      .setDesc("Averages pointer samples while you draw (main stabiliser).")
+      .addSlider((s) =>
+        s
+          .setLimits(0.2, 0.92, 0.02)
+          .setValue(this.plugin.settings.pfStreamline ?? 0.72)
+          .setDynamicTooltip()
+          .onChange(async (v) => {
+            this.plugin.settings.pfStreamline = v;
+            this.plugin.settings = sanitizeSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+            this.plugin.getActiveInkView()?.refreshStrokeSettings();
+          }),
+      );
+    new Setting(containerEl)
+      .setName("Outline smoothing")
+      .setDesc("Smooths the rendered stroke edge after points are collected.")
+      .addSlider((s) =>
+        s
+          .setLimits(0.2, 0.9, 0.02)
+          .setValue(this.plugin.settings.pfSmoothing ?? 0.68)
+          .setDynamicTooltip()
+          .onChange(async (v) => {
+            this.plugin.settings.pfSmoothing = v;
+            this.plugin.settings = sanitizeSettings(this.plugin.settings);
+            await this.plugin.saveSettings();
+            this.plugin.getActiveInkView()?.refreshStrokeSettings();
+          }),
+      );
+
     // ——— Zoom ———
     containerEl.createEl("h3", { text: "Zoom" });
     new Setting(containerEl)
