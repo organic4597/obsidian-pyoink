@@ -167,6 +167,14 @@ export class PyoInkView extends ItemView {
   async onClose() {
     await this.flushSave();
     this.teardownWatchers();
+    if (this.penWindowUnsub) {
+      this.penWindowUnsub();
+      this.penWindowUnsub = null;
+    }
+    if (this.writingSessionTimer) {
+      window.clearTimeout(this.writingSessionTimer);
+      this.writingSessionTimer = null;
+    }
     if (this.raf) cancelAnimationFrame(this.raf);
   }
 
@@ -1047,6 +1055,7 @@ export class PyoInkView extends ItemView {
   }
 
   private writingSessionTimer: number | null = null;
+  private penWindowUnsub: (() => void) | null = null;
 
   private setPenInkingUi(on: boolean) {
     this.rootEl?.classList.toggle("is-pen-inking", on);
@@ -1775,15 +1784,19 @@ export class PyoInkView extends ItemView {
       if (this.state === "ready" || this.state === "stroking") this.requestRedraw();
     };
 
-    /** Active pen stroke pointer id (simple latch — no soft-lift nonsense). */
+    /**
+     * Active pen stroke id. Cleared only when stroke ends.
+     * Character writing = many tip-up/tip-down; continuous line = one long stroke.
+     */
     let penStrokeId: number | null = null;
+    /** Consecutive move frames with buttons===0 while stroking (debounce tip-up). */
+    let penButtonsUpFrames = 0;
 
     const endPenStroke = (pointerId: number) => {
-      if (penStrokeId !== pointerId && !this.engine.isStroking()) {
-        penStrokeId = null;
+      if (penStrokeId == null && !this.engine.isStroking() && !this.engine.getActive()) {
         return;
       }
-      if (this.engine.isStroking()) {
+      if (this.engine.isStroking() || this.engine.getActive()) {
         const changed = this.engine.end();
         if (changed) {
           this.markDirty();
@@ -1805,6 +1818,7 @@ export class PyoInkView extends ItemView {
       this.gestures.clearActiveDraw();
       this.gestures.releasePointer(pointerId, "pen");
       penStrokeId = null;
+      penButtonsUpFrames = 0;
       this.state = "ready";
       this.setPenInkingUi(false);
       this.clearTextSelection();
@@ -1820,10 +1834,17 @@ export class PyoInkView extends ItemView {
 
     const beginPenStroke = (ev: PointerEvent) => {
       if (this.gestures.navigateMode) return;
-      // Already drawing this pen — ignore re-entry
-      if (penStrokeId === ev.pointerId && this.engine.getActive()) return;
+      // Same tip still down with open stroke — just keep going
+      if (penStrokeId === ev.pointerId && this.engine.getActive()) {
+        penButtonsUpFrames = 0;
+        return;
+      }
 
-      // Kill palm pan
+      // Tip re-down for next Hangul stroke: previous must be fully closed first
+      if (this.engine.getActive() || this.engine.isStroking()) {
+        endPenStroke(penStrokeId ?? ev.pointerId);
+      }
+
       if (this.scrollTouchId != null || this.flingRaf || this.panRaf) {
         stopFling();
         this.killPalmPanForPen(ev);
@@ -1838,6 +1859,7 @@ export class PyoInkView extends ItemView {
       }
 
       penStrokeId = ev.pointerId;
+      penButtonsUpFrames = 0;
       this.gestures.forcePenDrawStart(ev.pointerId);
       this.state = "stroking";
       try {
@@ -1868,23 +1890,29 @@ export class PyoInkView extends ItemView {
     };
 
     const extendPenStroke = (ev: PointerEvent) => {
-      if (penStrokeId !== ev.pointerId && !this.engine.getActive()) return;
-      if (penStrokeId == null && this.engine.getActive()) penStrokeId = ev.pointerId;
+      if (!this.engine.getActive() && penStrokeId == null) return;
+      // Never add points while tip is up (would draw air between Hangul strokes)
+      if (ev.buttons <= 0) return;
+
+      penButtonsUpFrames = 0;
+      if (penStrokeId == null) penStrokeId = ev.pointerId;
       this.gestures.stickyPenContact(ev.pointerId);
 
       const list =
         typeof ev.getCoalescedEvents === "function" && ev.getCoalescedEvents().length
           ? ev.getCoalescedEvents()
           : [ev];
-      const samples = list.map((e) => samplePen(e));
+      // Only samples where tip is still down
+      const samples = list
+        .filter((e) => e.buttons > 0)
+        .map((e) => samplePen(e));
+      if (!samples.length) return;
 
       if (this.gestures.getTool() === "eraser") {
         for (const s of samples) this.engine.eraseAt(s.x, s.y, this.eraserRadius());
         this.cacheValid = false;
       } else if (!this.engine.getActive()) {
-        // Should not happen mid-stroke; recover once
         const s0 = samples[0];
-        if (!s0) return;
         const tool = this.gestures.getTool();
         if (tool !== "eraser") {
           this.engine.beginPen(
@@ -1907,14 +1935,13 @@ export class PyoInkView extends ItemView {
       this.requestRedraw();
     };
 
-    // ——— PEN: single canvas path (down → move → up). No root-capture races. ———
+    // ——— PEN: canvas path. Character writing = many tip-up/down; line = one long stroke. ———
     c.addEventListener(
       "pointerdown",
       (ev) => {
         if (ev.pointerType !== "pen") return;
         if (this.gestures.navigateMode) return;
         setHoverFromEvent(ev);
-        // Tip down: buttons pressed (standard Pencil contact)
         if (ev.buttons > 0) {
           beginPenStroke(ev);
           ev.preventDefault();
@@ -1929,14 +1956,27 @@ export class PyoInkView extends ItemView {
         if (ev.pointerType !== "pen") return;
         setHoverFromEvent(ev);
 
-        // Drawing: always extend until pointerup (ignore buttons flicker)
-        if (penStrokeId === ev.pointerId || this.engine.getActive()) {
-          extendPenStroke(ev);
+        const open = penStrokeId != null || this.engine.getActive() != null;
+
+        if (open) {
+          if (ev.buttons > 0) {
+            // Tip still down — extend
+            penButtonsUpFrames = 0;
+            extendPenStroke(ev);
+          } else {
+            // Tip up: real lift between Hangul strokes often has buttons=0 moves
+            // *before* pointerup. End after 2 frames so one-frame flicker is ignored
+            // but character tip-lifts still split strokes cleanly.
+            penButtonsUpFrames++;
+            if (penButtonsUpFrames >= 2) {
+              endPenStroke(penStrokeId ?? ev.pointerId);
+            }
+          }
           ev.preventDefault();
           return;
         }
 
-        // Missed down recovery: tip pressed but no open stroke
+        // No open stroke: tip-down without pointerdown (common after quick re-tap)
         if (ev.buttons > 0 && !this.gestures.navigateMode) {
           beginPenStroke(ev);
           extendPenStroke(ev);
@@ -1949,13 +1989,20 @@ export class PyoInkView extends ItemView {
     const penUp = (ev: PointerEvent) => {
       if (ev.pointerType !== "pen") return;
       setHoverFromEvent(ev);
-      if (penStrokeId === ev.pointerId || this.engine.isStroking() || this.engine.getActive()) {
-        endPenStroke(ev.pointerId);
+      if (penStrokeId != null || this.engine.isStroking() || this.engine.getActive()) {
+        endPenStroke(penStrokeId ?? ev.pointerId);
         ev.preventDefault();
       }
     };
+    // Window capture: tip-up must never be missed between Hangul strokes
     c.addEventListener("pointerup", penUp, { capture: true });
     c.addEventListener("pointercancel", penUp, { capture: true });
+    window.addEventListener("pointerup", penUp, true);
+    window.addEventListener("pointercancel", penUp, true);
+    this.penWindowUnsub = () => {
+      window.removeEventListener("pointerup", penUp, true);
+      window.removeEventListener("pointercancel", penUp, true);
+    };
 
     // ——— TOUCH / mouse (pan, pinch) — not pen ———
     c.addEventListener("pointerdown", (ev) => {
@@ -2465,7 +2512,7 @@ export class PyoInkView extends ItemView {
       snapshotAt: Date.now(),
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.6.0";
+    this.doc.meta.appVersion = "0.6.1";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new Notice("PyoInk: remote ink changed — saving local will overwrite");

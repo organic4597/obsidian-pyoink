@@ -1216,7 +1216,7 @@ function emptyDoc(source) {
       createdAt: now,
       updatedAt: now,
       appId: "pyoink",
-      appVersion: "0.6.0"
+      appVersion: "0.6.1"
     }
   };
 }
@@ -1773,6 +1773,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.rgbPanelOpen = false;
     this.rgbPanelEl = null;
     this.writingSessionTimer = null;
+    this.penWindowUnsub = null;
     this.statusChromeRaf = 0;
     this.engine = new StrokeEngine(plugin.settings);
     this.gestures = new GestureRouter(() => this.plugin.settings);
@@ -1814,6 +1815,14 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   async onClose() {
     await this.flushSave();
     this.teardownWatchers();
+    if (this.penWindowUnsub) {
+      this.penWindowUnsub();
+      this.penWindowUnsub = null;
+    }
+    if (this.writingSessionTimer) {
+      window.clearTimeout(this.writingSessionTimer);
+      this.writingSessionTimer = null;
+    }
     if (this.raf) cancelAnimationFrame(this.raf);
   }
   async openFile(file) {
@@ -3193,12 +3202,12 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       if (this.state === "ready" || this.state === "stroking") this.requestRedraw();
     };
     let penStrokeId = null;
+    let penButtonsUpFrames = 0;
     const endPenStroke = (pointerId) => {
-      if (penStrokeId !== pointerId && !this.engine.isStroking()) {
-        penStrokeId = null;
+      if (penStrokeId == null && !this.engine.isStroking() && !this.engine.getActive()) {
         return;
       }
-      if (this.engine.isStroking()) {
+      if (this.engine.isStroking() || this.engine.getActive()) {
         const changed = this.engine.end();
         if (changed) {
           this.markDirty();
@@ -3220,6 +3229,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       this.gestures.clearActiveDraw();
       this.gestures.releasePointer(pointerId, "pen");
       penStrokeId = null;
+      penButtonsUpFrames = 0;
       this.state = "ready";
       this.setPenInkingUi(false);
       this.clearTextSelection();
@@ -3233,7 +3243,13 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     };
     const beginPenStroke = (ev) => {
       if (this.gestures.navigateMode) return;
-      if (penStrokeId === ev.pointerId && this.engine.getActive()) return;
+      if (penStrokeId === ev.pointerId && this.engine.getActive()) {
+        penButtonsUpFrames = 0;
+        return;
+      }
+      if (this.engine.getActive() || this.engine.isStroking()) {
+        endPenStroke(penStrokeId ?? ev.pointerId);
+      }
       if (this.scrollTouchId != null || this.flingRaf || this.panRaf) {
         stopFling();
         this.killPalmPanForPen(ev);
@@ -3247,6 +3263,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         this.saveTimer = null;
       }
       penStrokeId = ev.pointerId;
+      penButtonsUpFrames = 0;
       this.gestures.forcePenDrawStart(ev.pointerId);
       this.state = "stroking";
       try {
@@ -3268,17 +3285,19 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       this.requestRedraw();
     };
     const extendPenStroke = (ev) => {
-      if (penStrokeId !== ev.pointerId && !this.engine.getActive()) return;
-      if (penStrokeId == null && this.engine.getActive()) penStrokeId = ev.pointerId;
+      if (!this.engine.getActive() && penStrokeId == null) return;
+      if (ev.buttons <= 0) return;
+      penButtonsUpFrames = 0;
+      if (penStrokeId == null) penStrokeId = ev.pointerId;
       this.gestures.stickyPenContact(ev.pointerId);
       const list = typeof ev.getCoalescedEvents === "function" && ev.getCoalescedEvents().length ? ev.getCoalescedEvents() : [ev];
-      const samples = list.map((e2) => samplePen(e2));
+      const samples = list.filter((e2) => e2.buttons > 0).map((e2) => samplePen(e2));
+      if (!samples.length) return;
       if (this.gestures.getTool() === "eraser") {
         for (const s2 of samples) this.engine.eraseAt(s2.x, s2.y, this.eraserRadius());
         this.cacheValid = false;
       } else if (!this.engine.getActive()) {
         const s0 = samples[0];
-        if (!s0) return;
         const tool = this.gestures.getTool();
         if (tool !== "eraser") {
           this.engine.beginPen(
@@ -3314,8 +3333,17 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       (ev) => {
         if (ev.pointerType !== "pen") return;
         setHoverFromEvent(ev);
-        if (penStrokeId === ev.pointerId || this.engine.getActive()) {
-          extendPenStroke(ev);
+        const open = penStrokeId != null || this.engine.getActive() != null;
+        if (open) {
+          if (ev.buttons > 0) {
+            penButtonsUpFrames = 0;
+            extendPenStroke(ev);
+          } else {
+            penButtonsUpFrames++;
+            if (penButtonsUpFrames >= 2) {
+              endPenStroke(penStrokeId ?? ev.pointerId);
+            }
+          }
           ev.preventDefault();
           return;
         }
@@ -3330,13 +3358,19 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     const penUp = (ev) => {
       if (ev.pointerType !== "pen") return;
       setHoverFromEvent(ev);
-      if (penStrokeId === ev.pointerId || this.engine.isStroking() || this.engine.getActive()) {
-        endPenStroke(ev.pointerId);
+      if (penStrokeId != null || this.engine.isStroking() || this.engine.getActive()) {
+        endPenStroke(penStrokeId ?? ev.pointerId);
         ev.preventDefault();
       }
     };
     c2.addEventListener("pointerup", penUp, { capture: true });
     c2.addEventListener("pointercancel", penUp, { capture: true });
+    window.addEventListener("pointerup", penUp, true);
+    window.addEventListener("pointercancel", penUp, true);
+    this.penWindowUnsub = () => {
+      window.removeEventListener("pointerup", penUp, true);
+      window.removeEventListener("pointercancel", penUp, true);
+    };
     c2.addEventListener("pointerdown", (ev) => {
       if (ev.pointerType === "pen") return;
       if (this.state !== "ready" && this.state !== "stroking") {
@@ -3767,7 +3801,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       snapshotAt: Date.now()
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.6.0";
+    this.doc.meta.appVersion = "0.6.1";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new import_obsidian2.Notice("PyoInk: remote ink changed \u2014 saving local will overwrite");
