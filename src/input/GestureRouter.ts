@@ -150,16 +150,8 @@ export class GestureRouter {
    * Fixes: after finger scroll, pen ink stops (stuck activeDrawId / fingerIds / capture).
    */
   preemptForPen(pointerId: number) {
-    this.fingerIds.clear();
-    this.multiFingerAnchor = null;
-    this.multiFingerMaxMove = 0;
-    this.pinch = null;
-    // Drop any non-pen pointer records
-    Array.from(this.pointers.entries()).forEach(([id, pev]) => {
-      if (id === pointerId) return;
-      if (pev.pointerType === "pen") return;
-      this.pointers.delete(id);
-    });
+    // Always drop palm/finger tracking first — hand-rest pan was stealing re-down
+    this.clearAllTouchState();
     // Stuck draw lock (often a leftover touch id) blocks pen as E_PTR_SECONDARY
     if (this.activeDrawId !== null && this.activeDrawId !== pointerId) {
       inkLog("E_PTR_SECONDARY", "preempt_for_pen_clear");
@@ -207,6 +199,30 @@ export class GestureRouter {
   private penTipDown(): boolean {
     // Do NOT use activeDrawType — it can stick and confuse channels.
     return this.penDownIds.size > 0;
+  }
+
+  /** Public: palm/finger pan must yield while Pencil tip is down. */
+  isPenContacting(): boolean {
+    return this.penTipDown();
+  }
+
+  /**
+   * Nuke all touch/palm tracking so a mid-write hand rest cannot keep
+   * a scroll/drag lock that steals the next pen stroke.
+   */
+  clearAllTouchState() {
+    this.fingerIds.clear();
+    this.multiFingerAnchor = null;
+    this.multiFingerMaxMove = 0;
+    this.pinch = null;
+    Array.from(this.pointers.entries()).forEach(([id, pev]) => {
+      if (pev.pointerType === "pen") return;
+      this.pointers.delete(id);
+    });
+    // Touch must never hold the draw lock under pen-only mode
+    if (this.activeDrawType === "touch") {
+      this.clearActiveDraw();
+    }
   }
 
   /** Palm guard for ink — includes short post-pen window. */
@@ -277,10 +293,10 @@ export class GestureRouter {
     }
 
     if (ev.pointerType === "touch") {
-      // Only block while pen tip is actually down — do NOT block one-finger
-      // pan during post-pen palmReject window (that made swipe feel broken).
-      if (this.penTipDown()) {
-        inkLog("E_PALM");
+      // Palm/hand while Pencil is writing: never start a pan/drag lock.
+      // (Post-pen palmReject still allows finger pan after lift — only tip-down blocks.)
+      if (this.penTipDown() || this.activeDrawType === "pen") {
+        inkLog("E_PALM", "touch_down_while_pen");
         return { type: "ignore" };
       }
 
@@ -355,8 +371,11 @@ export class GestureRouter {
       this.movedPx = Math.max(this.movedPx, Math.hypot(dx, dy));
     }
 
-    // Palm block only while tip is down; allow pan after pen lift.
-    if (ev.pointerType === "touch" && this.penTipDown()) {
+    // Palm block while tip is down OR pen stroke is active — never pan under ink
+    if (
+      ev.pointerType === "touch" &&
+      (this.penTipDown() || this.activeDrawType === "pen")
+    ) {
       return { type: "ignore" };
     }
 
