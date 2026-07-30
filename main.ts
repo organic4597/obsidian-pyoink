@@ -174,7 +174,7 @@ class PyoInkSettingTab extends PluginSettingTab {
     );
 
     new Setting(containerEl)
-      .setName("Enable Pencil tip double-tap")
+      .setName("Enable Pencil tip double-tap (~220ms window; off = zero delay handwriting)")
       .setDesc("Two quick tip taps → double-tap action below.")
       .addToggle((t) =>
         t

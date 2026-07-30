@@ -378,21 +378,27 @@ export class GestureRouter {
       this.penDownIds.delete(ev.pointerId);
       this.lastPenAt = performance.now();
 
-      // Pencil tip double / single tap — MUST NOT fire during normal handwriting.
-      // Writing letters has many short lifts; loose thresholds caused undo/cycle ("drag weird").
+      // Pencil tip double / single tap — MUST NOT add latency to normal handwriting.
+      // Real strokes commit immediately on up (draw-end). Tip-tap is opt-in + very short window.
       const sPen = s;
       const wasDrawing = this.activeDrawId === ev.pointerId;
       const holdMs = performance.now() - (this.penDownAt || performance.now());
       const sample = this.sampleFromEvent(ev, canvasRect);
-      // True tip-tap only: almost a stationary poke
-      const tipTap = this.movedPx < 12 && holdMs < 200;
-      if (tipTap && wasDrawing && performance.now() - this.lastShortcutAt > 200) {
+      // True tip-tap only: near-stationary poke (not letter strokes)
+      const tipTap = this.movedPx < 10 && holdMs < 150;
+      const tipTapEnabled =
+        sPen.enablePencilDoubleTap === true ||
+        (sPen.pencilSingleTapAction && sPen.pencilSingleTapAction !== "ink");
+
+      if (tipTap && wasDrawing && tipTapEnabled && performance.now() - this.lastShortcutAt > 50) {
         const now = performance.now();
-        // Double-tap first
+        // Double-tap: very short gap (default ~220ms) — feels snappy, not sticky
+        const dblWindow = 220;
         if (
           sPen.enablePencilDoubleTap === true &&
-          now - this.lastPenTapAt < 380 &&
-          Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 40
+          this.lastPenTapAt > 0 &&
+          now - this.lastPenTapAt < dblWindow &&
+          Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 36
         ) {
           this.lastPenTapAt = 0;
           this.lastShortcutAt = now;
@@ -407,10 +413,12 @@ export class GestureRouter {
             pointerId: ev.pointerId,
           };
         }
-        // Record for possible second tap
-        this.lastPenTapAt = now;
-        this.lastPenTapX = sample.x;
-        this.lastPenTapY = sample.y;
+        // Record first tip for possible second (only when double-tap enabled)
+        if (sPen.enablePencilDoubleTap === true) {
+          this.lastPenTapAt = now;
+          this.lastPenTapX = sample.x;
+          this.lastPenTapY = sample.y;
+        }
 
         // Single short tip tap → optional non-ink action
         const single = sPen.pencilSingleTapAction || "ink";
@@ -426,9 +434,9 @@ export class GestureRouter {
             pointerId: ev.pointerId,
           };
         }
-        // ink mode: fall through to draw-end
+        // ink mode: fall through to draw-end immediately (no wait for 2nd tap)
       } else if (wasDrawing) {
-        // Real stroke — clear tip-tap memory so next letter isn't double-tap
+        // Real handwriting stroke — wipe tip memory so next stroke is instant / never double-tap
         this.lastPenTapAt = 0;
       }
     }

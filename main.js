@@ -820,10 +820,12 @@ var GestureRouter = class {
       const wasDrawing = this.activeDrawId === ev.pointerId;
       const holdMs = performance.now() - (this.penDownAt || performance.now());
       const sample = this.sampleFromEvent(ev, canvasRect);
-      const tipTap = this.movedPx < 12 && holdMs < 200;
-      if (tipTap && wasDrawing && performance.now() - this.lastShortcutAt > 200) {
+      const tipTap = this.movedPx < 10 && holdMs < 150;
+      const tipTapEnabled = sPen.enablePencilDoubleTap === true || sPen.pencilSingleTapAction && sPen.pencilSingleTapAction !== "ink";
+      if (tipTap && wasDrawing && tipTapEnabled && performance.now() - this.lastShortcutAt > 50) {
         const now = performance.now();
-        if (sPen.enablePencilDoubleTap === true && now - this.lastPenTapAt < 380 && Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 40) {
+        const dblWindow = 220;
+        if (sPen.enablePencilDoubleTap === true && this.lastPenTapAt > 0 && now - this.lastPenTapAt < dblWindow && Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 36) {
           this.lastPenTapAt = 0;
           this.lastShortcutAt = now;
           this.clearActiveDraw();
@@ -834,9 +836,11 @@ var GestureRouter = class {
             pointerId: ev.pointerId
           };
         }
-        this.lastPenTapAt = now;
-        this.lastPenTapX = sample.x;
-        this.lastPenTapY = sample.y;
+        if (sPen.enablePencilDoubleTap === true) {
+          this.lastPenTapAt = now;
+          this.lastPenTapX = sample.x;
+          this.lastPenTapY = sample.y;
+        }
         const single = sPen.pencilSingleTapAction || "ink";
         if (single !== "ink") {
           this.lastShortcutAt = now;
@@ -1037,7 +1041,7 @@ function emptyDoc(source) {
       createdAt: now,
       updatedAt: now,
       appId: "pyoink",
-      appVersion: "0.3.3"
+      appVersion: "0.3.4"
     }
   };
 }
@@ -1543,6 +1547,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.panPendingY = 0;
     this.rgbPanelOpen = false;
     this.rgbPanelEl = null;
+    this.statusChromeRaf = 0;
     this.engine = new StrokeEngine(plugin.settings);
     this.gestures = new GestureRouter(() => this.plugin.settings);
     this.store = new InkStore(this.app, () => this.plugin.settings);
@@ -2229,6 +2234,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       this.viewZoom = z2;
       this.gestures.setViewZoom(z2);
       this.applyPageZoom();
+      this.updateStatusChrome();
       return;
     }
     const scroll = this.scrollEl;
@@ -2264,8 +2270,13 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   /**
    * Keep Pencil input path healthy without heavy work on every stroke.
+   * Fast path: no-op when already clean (normal stroke→stroke handwriting).
    */
   ensurePenChannelLive(ev) {
+    const stuck = this.scrollTouchId != null || this.flingRaf !== 0 || this.panRaf !== 0 || this.canvas.classList.contains("is-pass-through") || this.canvas.style.pointerEvents === "none" || this.state !== "ready" && this.state !== "stroking" || this.engine.isStroking() && this.gestures.getActiveDrawId() === null;
+    if (!stuck) {
+      return;
+    }
     if (this.flingRaf) {
       cancelAnimationFrame(this.flingRaf);
       this.flingRaf = 0;
@@ -3020,9 +3031,16 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   markDirty() {
     this.dirty = true;
-    this.updateStatusChrome();
+    this.scheduleStatusChrome();
     if (this.engine.isStroking() || this.state === "stroking") return;
     this.scheduleSave();
+  }
+  scheduleStatusChrome() {
+    if (this.statusChromeRaf) return;
+    this.statusChromeRaf = requestAnimationFrame(() => {
+      this.statusChromeRaf = 0;
+      this.updateStatusChrome();
+    });
   }
   /** Full cache rebuild required (undo/redo/erase/load). */
   invalidateInkCache() {
@@ -3065,7 +3083,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       snapshotAt: Date.now()
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.3.3";
+    this.doc.meta.appVersion = "0.3.4";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new import_obsidian2.Notice("PyoInk: remote ink changed \u2014 saving local will overwrite");
@@ -3314,7 +3332,7 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
       "Short tip tap (almost no drag). Default: draw. Other choices run a shortcut instead of leaving a mark.",
       this.plugin.settings.pencilSingleTapAction || "ink"
     );
-    new import_obsidian3.Setting(containerEl).setName("Enable Pencil tip double-tap").setDesc("Two quick tip taps \u2192 double-tap action below.").addToggle(
+    new import_obsidian3.Setting(containerEl).setName("Enable Pencil tip double-tap (~220ms window; off = zero delay handwriting)").setDesc("Two quick tip taps \u2192 double-tap action below.").addToggle(
       (t2) => t2.setValue(this.plugin.settings.enablePencilDoubleTap !== false).onChange(async (v2) => {
         this.plugin.settings.enablePencilDoubleTap = v2;
         await this.plugin.saveSettings();

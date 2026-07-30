@@ -917,6 +917,7 @@ export class PyoInkView extends ItemView {
       this.viewZoom = z2;
       this.gestures.setViewZoom(z2);
       this.applyPageZoom();
+      this.updateStatusChrome();
       return;
     }
 
@@ -959,8 +960,23 @@ export class PyoInkView extends ItemView {
 
   /**
    * Keep Pencil input path healthy without heavy work on every stroke.
+   * Fast path: no-op when already clean (normal stroke→stroke handwriting).
    */
   private ensurePenChannelLive(ev: PointerEvent) {
+    const stuck =
+      this.scrollTouchId != null ||
+      this.flingRaf !== 0 ||
+      this.panRaf !== 0 ||
+      this.canvas.classList.contains("is-pass-through") ||
+      this.canvas.style.pointerEvents === "none" ||
+      (this.state !== "ready" && this.state !== "stroking") ||
+      (this.engine.isStroking() && this.gestures.getActiveDrawId() === null);
+
+    if (!stuck) {
+      // Hot path: consecutive pen strokes — zero extra work
+      return;
+    }
+
     // Stop finger fling competing with ink
     if (this.flingRaf) {
       cancelAnimationFrame(this.flingRaf);
@@ -1832,10 +1848,20 @@ export class PyoInkView extends ItemView {
 
   private markDirty() {
     this.dirty = true;
-    this.updateStatusChrome();
+    // Defer badge DOM — never block pen lift→down
+    this.scheduleStatusChrome();
     // Never hit disk mid-stroke; only after idle
     if (this.engine.isStroking() || this.state === "stroking") return;
     this.scheduleSave();
+  }
+
+  private statusChromeRaf = 0;
+  private scheduleStatusChrome() {
+    if (this.statusChromeRaf) return;
+    this.statusChromeRaf = requestAnimationFrame(() => {
+      this.statusChromeRaf = 0;
+      this.updateStatusChrome();
+    });
   }
 
   /** Full cache rebuild required (undo/redo/erase/load). */
@@ -1882,7 +1908,7 @@ export class PyoInkView extends ItemView {
       snapshotAt: Date.now(),
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.3.3";
+    this.doc.meta.appVersion = "0.3.4";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new Notice("PyoInk: remote ink changed — saving local will overwrite");
