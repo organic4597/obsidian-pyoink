@@ -321,11 +321,8 @@ export class GestureRouter {
     this.movedPx = 0;
 
     if (ev.pointerType === "pen") {
-      // Contact: buttons OR pressure. Pure hover is both 0.
-      // Fast handwriting: never drop a tip-down because of one flaky frame.
-      const pr = typeof ev.pressure === "number" ? ev.pressure : 0;
-      const contacting = ev.buttons > 0 || pr > 0.01;
-      if (!contacting) {
+      // Tip contact = buttons only (pressure alone fires on hover on some iPads)
+      if (ev.buttons <= 0) {
         this.penDownIds.delete(ev.pointerId);
         this.lastPenAt = performance.now();
         return { type: "ignore" };
@@ -404,20 +401,15 @@ export class GestureRouter {
 
     if (ev.pointerType === "pen") {
       this.lastPenAt = performance.now();
-      const pr = typeof ev.pressure === "number" ? ev.pressure : 0;
-      // Sticky while this pen owns the draw lock — buttons can flicker 0 mid-glyph
-      if (ev.buttons > 0 || pr > 0.01 || this.activeDrawId === ev.pointerId) {
+      // Sticky while drawing: some frames drop buttons briefly mid-stroke
+      if (ev.buttons > 0 || this.activeDrawId === ev.pointerId) {
         this.penDownIds.add(ev.pointerId);
       } else {
         this.penDownIds.delete(ev.pointerId);
       }
 
-      // Rapid writing: missed pointerdown → tell view to start (view also recovers)
-      if (
-        this.activeDrawId === null &&
-        !this.navigateMode &&
-        (ev.buttons > 0 || pr > 0.01)
-      ) {
+      // Missed pointerdown recovery — buttons must be pressed (not hover)
+      if (this.activeDrawId === null && !this.navigateMode && ev.buttons > 0) {
         return this.forcePenDrawStart(ev.pointerId);
       }
     }
