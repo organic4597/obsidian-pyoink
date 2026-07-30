@@ -167,6 +167,38 @@ export class GestureRouter {
   }
 
   /**
+   * Force a new pen stroke lock. Used for rapid tip re-down and recovery
+   * when the previous stroke's locks were not fully cleared.
+   */
+  forcePenDrawStart(pointerId: number): GestureAction {
+    this.clearAllTouchState();
+    this.penDownIds.clear();
+    this.penDownIds.add(pointerId);
+    this.activeDrawId = pointerId;
+    this.activeDrawType = "pen";
+    this.lastPenAt = performance.now();
+    this.penDownAt = performance.now();
+    this.lastPenTapAt = 0;
+    this.movedPx = 0;
+    if (this.tool === "eraser") return { type: "erase-start", pointerId };
+    return { type: "draw-start", pointerId };
+  }
+
+  /** Mark pen still contacting even if buttons flickers 0 for a frame. */
+  stickyPenContact(pointerId: number) {
+    this.penDownIds.add(pointerId);
+    this.lastPenAt = performance.now();
+  }
+
+  /** Re-bind draw lock for pen-up without starting a new stroke (end only). */
+  bindPenForEnd(pointerId: number) {
+    this.penDownIds.add(pointerId);
+    this.activeDrawId = pointerId;
+    this.activeDrawType = "pen";
+    this.lastPenAt = performance.now();
+  }
+
+  /**
    * Drop one pointer without side-effect shortcuts (scroll pan end, lost capture).
    * Fixes freeze where fingerIds never cleared after scroll-only gestures.
    */
@@ -269,32 +301,16 @@ export class GestureRouter {
     this.movedPx = 0;
 
     if (ev.pointerType === "pen") {
-      // Contact: buttons>0 preferred. Also accept light pressure — some iPad
-      // frames arrive with buttons still 0 on the first contact event, which
-      // used to ignore the stroke start and feel like lift→re-down lag.
+      // Contact: buttons OR pressure. Pure hover is both 0.
+      // Fast handwriting: never drop a tip-down because of one flaky frame.
       const pr = typeof ev.pressure === "number" ? ev.pressure : 0;
-      const contacting = ev.buttons > 0 || pr > 0.02;
+      const contacting = ev.buttons > 0 || pr > 0.01;
       if (!contacting) {
-        // True hover / pre-contact — do not start ink
         this.penDownIds.delete(ev.pointerId);
         this.lastPenAt = performance.now();
         return { type: "ignore" };
       }
-      this.penDownIds.clear();
-      this.penDownIds.add(ev.pointerId);
-      // Fresh stroke: drop ANY stale draw lock (same or different id)
-      // so lift→re-down never waits on a stuck activeDrawId.
-      if (this.activeDrawId !== null) {
-        this.clearActiveDraw();
-      }
-      // Clear touch-only junk lightly
-      this.fingerIds.clear();
-      this.multiFingerAnchor = null;
-      this.multiFingerMaxMove = 0;
-      this.pinch = null;
-      this.lastPenAt = performance.now();
-      this.penDownAt = performance.now();
-      this.lastPenTapAt = 0; // never hold tip-tap memory across real strokes
+      return this.forcePenDrawStart(ev.pointerId);
     }
 
     if (ev.pointerType === "touch") {
@@ -362,11 +378,21 @@ export class GestureRouter {
 
     if (ev.pointerType === "pen") {
       this.lastPenAt = performance.now();
-      // Contact = buttons pressed. Do NOT use pressure alone (iPad hover can report pressure).
-      if (ev.buttons > 0) {
+      const pr = typeof ev.pressure === "number" ? ev.pressure : 0;
+      // Sticky while this pen owns the draw lock — buttons can flicker 0 mid-glyph
+      if (ev.buttons > 0 || pr > 0.01 || this.activeDrawId === ev.pointerId) {
         this.penDownIds.add(ev.pointerId);
       } else {
         this.penDownIds.delete(ev.pointerId);
+      }
+
+      // Rapid writing: missed pointerdown → tell view to start (view also recovers)
+      if (
+        this.activeDrawId === null &&
+        !this.navigateMode &&
+        (ev.buttons > 0 || pr > 0.01)
+      ) {
+        return this.forcePenDrawStart(ev.pointerId);
       }
     }
 
@@ -619,10 +645,11 @@ export class GestureRouter {
     };
   }
 
-  private collectSamples(ev: PointerEvent, rect: DOMRect): Sample[] {
+  collectSamples(ev: PointerEvent, rect: DOMRect): Sample[] {
     const list =
       typeof ev.getCoalescedEvents === "function" ? ev.getCoalescedEvents() : [ev];
-    return list.map((e) => this.sampleFromEvent(e, rect));
+    const raw = list && list.length ? list : [ev];
+    return raw.map((e) => this.sampleFromEvent(e, rect));
   }
 
   private touchPair(): { a: PointerEvent; b: PointerEvent } | null {
