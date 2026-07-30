@@ -93,6 +93,8 @@ export class PyoInkView extends ItemView {
   private needRedraw = false;
   private unsubModify: (() => void) | null = null;
   private resizeObs: ResizeObserver | null = null;
+  private contentMutObs: MutationObserver | null = null;
+  private layoutPassTimer: number | null = null;
   private cssW = 0;
   private cssH = 0;
   private scrollTouchId: number | null = null;
@@ -197,10 +199,12 @@ export class PyoInkView extends ItemView {
     this.engine.loadStrokes(this.doc.strokes);
     this.cacheValid = false;
 
-    await this.waitImages(2000);
+    await this.waitImages(2500);
     this.resizeAndRedraw(true);
+    this.scheduleLayoutPass();
     this.watchFile(file);
     this.watchResize();
+    this.watchContentMutations();
     this.state = this.state === "error" ? "error" : "ready";
     this.rootEl.focus();
   }
@@ -208,30 +212,70 @@ export class PyoInkView extends ItemView {
   /**
    * Render note like Obsidian Reading View so core/theme CSS applies
    * (headings, lists, callouts, embeds, readable line width, etc.).
+   *
+   * DOM mirrors reading mode:
+   *   .markdown-reading-view
+   *     .markdown-preview-view.markdown-rendered.is-readable-line-width
+   *       .markdown-preview-sizer
    */
   private async renderReadingView(md: string, file: TFile) {
     this.noteEl.empty();
     this.noteEl.removeClass("pyoink-content-source");
-    // Classes Obsidian themes target for reading layout
-    this.noteEl.addClasses([
-      "markdown-preview-view",
-      "markdown-rendered",
-      "node-insert-event",
-      "is-readable-line-width",
-      "allow-fold-headings",
-      "allow-fold-lists",
-    ]);
-    // Sizer matches reading-view hierarchy (themes often style this)
-    const sizer = this.noteEl.createDiv({
+    // Outer shell = reading view (themes key off this too)
+    this.noteEl.addClasses(["markdown-reading-view", "pyoink-reading-host"]);
+
+    const preview = this.noteEl.createDiv({
+      cls: [
+        "markdown-preview-view",
+        "markdown-rendered",
+        "node-insert-event",
+        "is-readable-line-width",
+        "allow-fold-headings",
+        "allow-fold-lists",
+      ].join(" "),
+    });
+    // Match file margins used by the app when available
+    try {
+      const fm = getComputedStyle(document.body).getPropertyValue("--file-margins").trim();
+      if (fm) preview.style.setProperty("padding", fm);
+    } catch {
+      /* theme default */
+    }
+
+    const sizer = preview.createDiv({
       cls: "markdown-preview-sizer markdown-preview-section",
     });
-    // spacer top (reading view often has one)
     sizer.createDiv({
       cls: "markdown-preview-pusher",
       attr: { style: "width: 1px; height: 0.1px; margin-bottom: 0;" },
     });
     await MarkdownRenderer.render(this.app, md, sizer, file.path, this);
     this.wireInternalLinks();
+  }
+
+  /**
+   * After fonts/images/embeds settle, remeasure so ink canvas matches text layout.
+   */
+  private scheduleLayoutPass() {
+    const run = () => {
+      if (!this.file || this.state === "error") return;
+      this.resizeAndRedraw(true);
+    };
+    // Immediate + after layout frames + late embeds
+    requestAnimationFrame(() => {
+      run();
+      requestAnimationFrame(run);
+    });
+    window.setTimeout(run, 120);
+    window.setTimeout(run, 400);
+    window.setTimeout(run, 1200);
+    // Fonts (headings/CJK can reflow)
+    try {
+      const fonts = (document as Document & { fonts?: FontFaceSet }).fonts;
+      if (fonts?.ready) void fonts.ready.then(() => run());
+    } catch {
+      /* */
+    }
   }
 
   private wireInternalLinks() {
@@ -1908,7 +1952,7 @@ export class PyoInkView extends ItemView {
       snapshotAt: Date.now(),
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.3.4";
+    this.doc.meta.appVersion = "0.4.0";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new Notice("PyoInk: remote ink changed — saving local will overwrite");
@@ -1979,6 +2023,29 @@ export class PyoInkView extends ItemView {
       this.resizeAndRedraw(false);
     });
     this.resizeObs.observe(this.pageEl);
+    this.resizeObs.observe(this.noteEl);
+  }
+
+  /** Embeds/callouts that load late can change height — remeasure ink layer. */
+  private watchContentMutations() {
+    if (this.contentMutObs) {
+      this.contentMutObs.disconnect();
+      this.contentMutObs = null;
+    }
+    this.contentMutObs = new MutationObserver(() => {
+      if (this.layoutPassTimer) window.clearTimeout(this.layoutPassTimer);
+      this.layoutPassTimer = window.setTimeout(() => {
+        this.layoutPassTimer = null;
+        if (this.engine.isStroking()) return;
+        this.resizeAndRedraw(false);
+      }, 80);
+    });
+    this.contentMutObs.observe(this.noteEl, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["style", "class", "src"],
+    });
   }
 
   private teardownWatchers() {
@@ -1990,13 +2057,36 @@ export class PyoInkView extends ItemView {
       this.resizeObs.disconnect();
       this.resizeObs = null;
     }
+    if (this.contentMutObs) {
+      this.contentMutObs.disconnect();
+      this.contentMutObs = null;
+    }
+    if (this.layoutPassTimer) {
+      window.clearTimeout(this.layoutPassTimer);
+      this.layoutPassTimer = null;
+    }
   }
 
   private resizeAndRedraw(forceCache: boolean) {
     if (!this.file) return;
-    // measure content natural size
-    const contentW = Math.max(this.noteEl.scrollWidth, this.noteEl.clientWidth, this.scrollEl.clientWidth, 1);
-    let contentH = Math.max(this.noteEl.scrollHeight, this.noteEl.clientHeight, this.scrollEl.clientHeight, 1);
+    // Prefer preview sizer metrics (matches reading view column)
+    const sizer =
+      this.noteEl.querySelector(".markdown-preview-sizer") as HTMLElement | null;
+    const measureEl = sizer || this.noteEl;
+    const contentW = Math.max(
+      measureEl.scrollWidth,
+      measureEl.clientWidth,
+      this.noteEl.scrollWidth,
+      this.scrollEl.clientWidth,
+      1,
+    );
+    let contentH = Math.max(
+      measureEl.scrollHeight,
+      measureEl.clientHeight,
+      this.noteEl.scrollHeight,
+      this.scrollEl.clientHeight,
+      1,
+    );
     if (contentH > this.plugin.settings.maxCanvasCssHeight) {
       contentH = this.plugin.settings.maxCanvasCssHeight;
       inkLog("E_CANVAS_MAX", contentH);

@@ -36,14 +36,14 @@
   will-change: transform;
 }
 
-/* Note body — use Obsidian Reading View classes on the same node (see TS).
-   Keep pointer-events none so ink canvas receives Pencil; Nav mode re-enables via .is-navigate */
-.pyoink-content {
+/* Note host — mirrors reading-view hierarchy (see renderReadingView).
+   pointer-events none so ink canvas gets Pencil; Nav re-enables clicks. */
+.pyoink-content,
+.pyoink-reading-host {
   position: relative;
   z-index: 1;
   pointer-events: none;
   background: transparent;
-  /* Let theme control readable width / padding via .markdown-preview-view */
   width: 100%;
   max-width: 100%;
   margin: 0;
@@ -51,24 +51,40 @@
   box-sizing: border-box;
 }
 
-/* Mirror reading view metrics so layout matches the normal note */
-.pyoink-content.markdown-preview-view {
+/* Inner preview: let theme drive line width, type scale, callouts, etc. */
+.pyoink-reading-host .markdown-preview-view {
   overflow: visible;
-  /* bottom room for floating toolbar */
-  padding-bottom: 7rem;
-}
-
-.pyoink-content.markdown-preview-view .markdown-preview-sizer {
-  /* theme uses --file-line-width when is-readable-line-width is set */
+  background: transparent;
+  /* room for floating tool island */
+  padding-bottom: 7rem !important;
   min-height: 100%;
-  padding-bottom: 2rem;
 }
 
-.pyoink-page.is-navigate .pyoink-content {
+.pyoink-reading-host .markdown-preview-sizer {
+  /* theme + is-readable-line-width → --file-line-width */
+  min-height: 40vh;
+  padding-bottom: 2rem;
+  max-width: var(--file-line-width, 700px);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Avoid forcing type styles — inherit app/theme fully */
+.pyoink-reading-host .markdown-preview-view img {
+  max-width: 100%;
+}
+
+.pyoink-page.is-navigate .pyoink-content,
+.pyoink-page.is-navigate .pyoink-reading-host {
   pointer-events: auto;
 }
 
-.pyoink-content a {
+.pyoink-page.is-navigate .pyoink-reading-host .markdown-preview-view {
+  pointer-events: auto;
+}
+
+.pyoink-content a,
+.pyoink-reading-host a {
   cursor: pointer;
 }
 

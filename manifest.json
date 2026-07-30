@@ -1,9 +1,9 @@
 {
   "id": "pyoink",
   "name": "PyoInk",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "minAppVersion": "1.5.0",
-  "description": "Ink on Markdown. Toolbar for pen; settings only finger shortcuts & storage.",
+  "description": "Transparent ink on Markdown notes. Pen/highlighter/eraser overlay; strokes saved as JSON sidecars without editing the .md.",
   "author": "organic4597",
   "authorUrl": "https://github.com/organic4597",
   "isDesktopOnly": false

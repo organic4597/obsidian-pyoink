@@ -48,11 +48,41 @@ export default class PyoInkPlugin extends Plugin {
     return null;
   }
 
+  /**
+   * Open PyoInk on a note.
+   * Default: replace the current tab (less jarring). Optional: new tab.
+   * Reuses an existing PyoInk leaf that already shows the same file.
+   */
   async openInk(file: TFile) {
-    const leaf = this.app.workspace.getLeaf(true);
+    // Reuse existing PyoInk leaf for this file
+    for (const l of this.app.workspace.getLeavesOfType(VIEW_TYPE_PYOINK)) {
+      const v = l.view;
+      if (v instanceof PyoInkView && v.file?.path === file.path) {
+        this.app.workspace.setActiveLeaf(l, { focus: true });
+        await v.openFile(file);
+        return;
+      }
+    }
+
+    const openNew = this.settings.openInNewTab === true;
+    const leaf = openNew
+      ? this.app.workspace.getLeaf("tab")
+      : this.app.workspace.getMostRecentLeaf() ?? this.app.workspace.getLeaf(false);
+
     await leaf.setViewState({ type: VIEW_TYPE_PYOINK, active: true });
+    this.app.workspace.setActiveLeaf(leaf, { focus: true });
     const view = leaf.view;
-    if (view instanceof PyoInkView) await view.openFile(file);
+    if (view instanceof PyoInkView) {
+      await view.openFile(file);
+      if (!this.settings.seenWelcomeTip) {
+        this.settings.seenWelcomeTip = true;
+        await this.saveSettings();
+        new Notice(
+          "PyoInk: draw with Pencil · finger pans · toolbar for tools/size · Exit saves",
+          6000,
+        );
+      }
+    }
   }
 
   async loadSettings() {
@@ -178,7 +208,7 @@ class PyoInkSettingTab extends PluginSettingTab {
       .setDesc("Two quick tip taps → double-tap action below.")
       .addToggle((t) =>
         t
-          .setValue(this.plugin.settings.enablePencilDoubleTap !== false)
+          .setValue(this.plugin.settings.enablePencilDoubleTap === true)
           .onChange(async (v) => {
             this.plugin.settings.enablePencilDoubleTap = v;
             await this.plugin.saveSettings();
@@ -192,7 +222,7 @@ class PyoInkSettingTab extends PluginSettingTab {
       "What two quick tip taps do (default: cycle pen / marker / eraser).",
       "pencilDoubleTapAction",
       this.plugin.settings.pencilDoubleTapAction || "cycle_tool",
-      !this.plugin.settings.enablePencilDoubleTap,
+      this.plugin.settings.enablePencilDoubleTap !== true,
     );
 
     // ——— Finger ———
@@ -223,6 +253,20 @@ class PyoInkSettingTab extends PluginSettingTab {
       "doubleTapAction",
       this.plugin.settings.doubleTapAction,
     );
+
+    // ——— Workspace ———
+    containerEl.createEl("h3", { text: "Workspace" });
+    new Setting(containerEl)
+      .setName("Open in new tab")
+      .setDesc(
+        "OFF (default): replace the current tab with PyoInk. ON: open PyoInk in a new tab.",
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.openInNewTab === true).onChange(async (v) => {
+          this.plugin.settings.openInNewTab = v;
+          await this.plugin.saveSettings();
+        }),
+      );
 
     // ——— Storage ———
     containerEl.createEl("h3", { text: "Storage" });

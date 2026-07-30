@@ -1421,7 +1421,9 @@ var DEFAULT_SETTINGS = {
   toolbarYPct: 92,
   twoFingerTapAction: "cycle_tool",
   threeFingerTapAction: "undo",
-  doubleTapAction: "toggle_nav"
+  doubleTapAction: "toggle_nav",
+  openInNewTab: false,
+  seenWelcomeTip: false
 };
 function sanitizeSettings(raw) {
   const s2 = Object.assign({}, DEFAULT_SETTINGS, raw ?? {});
@@ -1486,6 +1488,8 @@ function sanitizeSettings(raw) {
   if (s2.enableTwoFingerToolCycle === false && s2.twoFingerTapAction === "cycle_tool") {
     s2.twoFingerTapAction = "none";
   }
+  if (s2.openInNewTab === void 0) s2.openInNewTab = false;
+  if (s2.seenWelcomeTip === void 0) s2.seenWelcomeTip = false;
   return s2;
 }
 
@@ -1532,6 +1536,8 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.needRedraw = false;
     this.unsubModify = null;
     this.resizeObs = null;
+    this.contentMutObs = null;
+    this.layoutPassTimer = null;
     this.cssW = 0;
     this.cssH = 0;
     this.scrollTouchId = null;
@@ -1621,29 +1627,44 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     this.doc.sourceSize = file.stat.size;
     this.engine.loadStrokes(this.doc.strokes);
     this.cacheValid = false;
-    await this.waitImages(2e3);
+    await this.waitImages(2500);
     this.resizeAndRedraw(true);
+    this.scheduleLayoutPass();
     this.watchFile(file);
     this.watchResize();
+    this.watchContentMutations();
     this.state = this.state === "error" ? "error" : "ready";
     this.rootEl.focus();
   }
   /**
    * Render note like Obsidian Reading View so core/theme CSS applies
    * (headings, lists, callouts, embeds, readable line width, etc.).
+   *
+   * DOM mirrors reading mode:
+   *   .markdown-reading-view
+   *     .markdown-preview-view.markdown-rendered.is-readable-line-width
+   *       .markdown-preview-sizer
    */
   async renderReadingView(md, file) {
     this.noteEl.empty();
     this.noteEl.removeClass("pyoink-content-source");
-    this.noteEl.addClasses([
-      "markdown-preview-view",
-      "markdown-rendered",
-      "node-insert-event",
-      "is-readable-line-width",
-      "allow-fold-headings",
-      "allow-fold-lists"
-    ]);
-    const sizer = this.noteEl.createDiv({
+    this.noteEl.addClasses(["markdown-reading-view", "pyoink-reading-host"]);
+    const preview = this.noteEl.createDiv({
+      cls: [
+        "markdown-preview-view",
+        "markdown-rendered",
+        "node-insert-event",
+        "is-readable-line-width",
+        "allow-fold-headings",
+        "allow-fold-lists"
+      ].join(" ")
+    });
+    try {
+      const fm = getComputedStyle(document.body).getPropertyValue("--file-margins").trim();
+      if (fm) preview.style.setProperty("padding", fm);
+    } catch {
+    }
+    const sizer = preview.createDiv({
       cls: "markdown-preview-sizer markdown-preview-section"
     });
     sizer.createDiv({
@@ -1652,6 +1673,27 @@ var PyoInkView = class extends import_obsidian2.ItemView {
     });
     await import_obsidian2.MarkdownRenderer.render(this.app, md, sizer, file.path, this);
     this.wireInternalLinks();
+  }
+  /**
+   * After fonts/images/embeds settle, remeasure so ink canvas matches text layout.
+   */
+  scheduleLayoutPass() {
+    const run = () => {
+      if (!this.file || this.state === "error") return;
+      this.resizeAndRedraw(true);
+    };
+    requestAnimationFrame(() => {
+      run();
+      requestAnimationFrame(run);
+    });
+    window.setTimeout(run, 120);
+    window.setTimeout(run, 400);
+    window.setTimeout(run, 1200);
+    try {
+      const fonts = document.fonts;
+      if (fonts?.ready) void fonts.ready.then(() => run());
+    } catch {
+    }
   }
   wireInternalLinks() {
     this.noteEl.querySelectorAll("a.internal-link").forEach((a2) => {
@@ -3083,7 +3125,7 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       snapshotAt: Date.now()
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.3.4";
+    this.doc.meta.appVersion = "0.4.0";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new import_obsidian2.Notice("PyoInk: remote ink changed \u2014 saving local will overwrite");
@@ -3148,6 +3190,28 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       this.resizeAndRedraw(false);
     });
     this.resizeObs.observe(this.pageEl);
+    this.resizeObs.observe(this.noteEl);
+  }
+  /** Embeds/callouts that load late can change height — remeasure ink layer. */
+  watchContentMutations() {
+    if (this.contentMutObs) {
+      this.contentMutObs.disconnect();
+      this.contentMutObs = null;
+    }
+    this.contentMutObs = new MutationObserver(() => {
+      if (this.layoutPassTimer) window.clearTimeout(this.layoutPassTimer);
+      this.layoutPassTimer = window.setTimeout(() => {
+        this.layoutPassTimer = null;
+        if (this.engine.isStroking()) return;
+        this.resizeAndRedraw(false);
+      }, 80);
+    });
+    this.contentMutObs.observe(this.noteEl, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["style", "class", "src"]
+    });
   }
   teardownWatchers() {
     if (this.unsubModify) {
@@ -3158,11 +3222,33 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       this.resizeObs.disconnect();
       this.resizeObs = null;
     }
+    if (this.contentMutObs) {
+      this.contentMutObs.disconnect();
+      this.contentMutObs = null;
+    }
+    if (this.layoutPassTimer) {
+      window.clearTimeout(this.layoutPassTimer);
+      this.layoutPassTimer = null;
+    }
   }
   resizeAndRedraw(forceCache) {
     if (!this.file) return;
-    const contentW = Math.max(this.noteEl.scrollWidth, this.noteEl.clientWidth, this.scrollEl.clientWidth, 1);
-    let contentH = Math.max(this.noteEl.scrollHeight, this.noteEl.clientHeight, this.scrollEl.clientHeight, 1);
+    const sizer = this.noteEl.querySelector(".markdown-preview-sizer");
+    const measureEl = sizer || this.noteEl;
+    const contentW = Math.max(
+      measureEl.scrollWidth,
+      measureEl.clientWidth,
+      this.noteEl.scrollWidth,
+      this.scrollEl.clientWidth,
+      1
+    );
+    let contentH = Math.max(
+      measureEl.scrollHeight,
+      measureEl.clientHeight,
+      this.noteEl.scrollHeight,
+      this.scrollEl.clientHeight,
+      1
+    );
     if (contentH > this.plugin.settings.maxCanvasCssHeight) {
       contentH = this.plugin.settings.maxCanvasCssHeight;
       inkLog("E_CANVAS_MAX", contentH);
@@ -3247,11 +3333,36 @@ var PyoInkPlugin = class extends import_obsidian3.Plugin {
     }
     return null;
   }
+  /**
+   * Open PyoInk on a note.
+   * Default: replace the current tab (less jarring). Optional: new tab.
+   * Reuses an existing PyoInk leaf that already shows the same file.
+   */
   async openInk(file) {
-    const leaf = this.app.workspace.getLeaf(true);
+    for (const l2 of this.app.workspace.getLeavesOfType(VIEW_TYPE_PYOINK)) {
+      const v2 = l2.view;
+      if (v2 instanceof PyoInkView && v2.file?.path === file.path) {
+        this.app.workspace.setActiveLeaf(l2, { focus: true });
+        await v2.openFile(file);
+        return;
+      }
+    }
+    const openNew = this.settings.openInNewTab === true;
+    const leaf = openNew ? this.app.workspace.getLeaf("tab") : this.app.workspace.getMostRecentLeaf() ?? this.app.workspace.getLeaf(false);
     await leaf.setViewState({ type: VIEW_TYPE_PYOINK, active: true });
+    this.app.workspace.setActiveLeaf(leaf, { focus: true });
     const view = leaf.view;
-    if (view instanceof PyoInkView) await view.openFile(file);
+    if (view instanceof PyoInkView) {
+      await view.openFile(file);
+      if (!this.settings.seenWelcomeTip) {
+        this.settings.seenWelcomeTip = true;
+        await this.saveSettings();
+        new import_obsidian3.Notice(
+          "PyoInk: draw with Pencil \xB7 finger pans \xB7 toolbar for tools/size \xB7 Exit saves",
+          6e3
+        );
+      }
+    }
   }
   async loadSettings() {
     this.settings = sanitizeSettings(await this.loadData());
@@ -3333,7 +3444,7 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
       this.plugin.settings.pencilSingleTapAction || "ink"
     );
     new import_obsidian3.Setting(containerEl).setName("Enable Pencil tip double-tap (~220ms window; off = zero delay handwriting)").setDesc("Two quick tip taps \u2192 double-tap action below.").addToggle(
-      (t2) => t2.setValue(this.plugin.settings.enablePencilDoubleTap !== false).onChange(async (v2) => {
+      (t2) => t2.setValue(this.plugin.settings.enablePencilDoubleTap === true).onChange(async (v2) => {
         this.plugin.settings.enablePencilDoubleTap = v2;
         await this.plugin.saveSettings();
         this.display();
@@ -3345,7 +3456,7 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
       "What two quick tip taps do (default: cycle pen / marker / eraser).",
       "pencilDoubleTapAction",
       this.plugin.settings.pencilDoubleTapAction || "cycle_tool",
-      !this.plugin.settings.enablePencilDoubleTap
+      this.plugin.settings.enablePencilDoubleTap !== true
     );
     containerEl.createEl("h3", { text: "Finger taps" });
     containerEl.createEl("p", {
@@ -3372,6 +3483,15 @@ var PyoInkSettingTab = class extends import_obsidian3.PluginSettingTab {
       "Two quick taps with one finger.",
       "doubleTapAction",
       this.plugin.settings.doubleTapAction
+    );
+    containerEl.createEl("h3", { text: "Workspace" });
+    new import_obsidian3.Setting(containerEl).setName("Open in new tab").setDesc(
+      "OFF (default): replace the current tab with PyoInk. ON: open PyoInk in a new tab."
+    ).addToggle(
+      (t2) => t2.setValue(this.plugin.settings.openInNewTab === true).onChange(async (v2) => {
+        this.plugin.settings.openInNewTab = v2;
+        await this.plugin.saveSettings();
+      })
     );
     containerEl.createEl("h3", { text: "Storage" });
     new import_obsidian3.Setting(containerEl).setName("Annotations folder").setDesc("Where .pyoink.json files are stored (not under .obsidian).").addText(

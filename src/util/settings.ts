@@ -113,6 +113,13 @@ export interface PyoInkSettings {
   threeFingerTapAction: FingerAction;
   /** Single-finger double-tap (finger, not Pencil) */
   doubleTapAction: FingerAction;
+  /**
+   * When false (default): open PyoInk by replacing the current tab.
+   * When true: open in a new tab.
+   */
+  openInNewTab: boolean;
+  /** One-time welcome tip after first open. */
+  seenWelcomeTip: boolean;
 }
 
 /** Shared 7-step width ladders (toolbar slider). */
@@ -180,6 +187,8 @@ export const DEFAULT_SETTINGS: PyoInkSettings = {
   twoFingerTapAction: "cycle_tool",
   threeFingerTapAction: "undo",
   doubleTapAction: "toggle_nav",
+  openInNewTab: false,
+  seenWelcomeTip: false,
 };
 
 export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined): PyoInkSettings {
@@ -252,5 +261,7 @@ export function sanitizeSettings(raw: Partial<PyoInkSettings> | null | undefined
   if (s.enableTwoFingerToolCycle === false && s.twoFingerTapAction === "cycle_tool") {
     s.twoFingerTapAction = "none";
   }
+  if (s.openInNewTab === undefined) s.openInNewTab = false;
+  if (s.seenWelcomeTip === undefined) s.seenWelcomeTip = false;
   return s;
 }
