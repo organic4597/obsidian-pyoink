@@ -401,14 +401,12 @@ export class GestureRouter {
 
     if (ev.pointerType === "pen") {
       this.lastPenAt = performance.now();
-      // Sticky while drawing: some frames drop buttons briefly mid-stroke
+      // Sticky while drawing: buttons can flicker 0 mid-glyph — do NOT clear tip
+      // or force a new stroke here (that was splitting every Hangul stroke).
       if (ev.buttons > 0 || this.activeDrawId === ev.pointerId) {
         this.penDownIds.add(ev.pointerId);
-      } else {
-        this.penDownIds.delete(ev.pointerId);
       }
-
-      // Missed pointerdown recovery — buttons must be pressed (not hover)
+      // Only start from onMove when no stroke is open AND tip is down
       if (this.activeDrawId === null && !this.navigateMode && ev.buttons > 0) {
         return this.forcePenDrawStart(ev.pointerId);
       }

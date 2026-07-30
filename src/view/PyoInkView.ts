@@ -1745,8 +1745,9 @@ export class PyoInkView extends ItemView {
     };
 
     /**
-     * True tip contact only. Do NOT use pressure alone — Pencil hover can
-     * report residual pressure and that was starting fake strokes + killing hover.
+     * True tip contact. buttons only for *starting* a stroke.
+     * While already stroking, we keep sampling until pointerup (buttons can
+     * flicker 0 mid-glyph on iPad — that must NOT end the stroke).
      */
     const penTipDown = (ev: PointerEvent) => ev.buttons > 0;
 
@@ -1773,7 +1774,7 @@ export class PyoInkView extends ItemView {
       if (this.state === "ready" || this.state === "stroking") this.requestRedraw();
     };
 
-    /** Commit open stroke to cache immediately (Hangul multi-stroke safe). */
+    /** End stroke only here (pointerup) — never on move / soft-lift. */
     const commitOpenStrokeNow = () => {
       if (!this.engine.isStroking() && !this.gestures.isDrawing()) return;
       if (this.engine.isStroking()) {
@@ -1803,17 +1804,22 @@ export class PyoInkView extends ItemView {
     const startPenInk = (ev: PointerEvent, rect: DOMRect) => {
       if (this.gestures.navigateMode) return false;
       if (!penTipDown(ev)) return false;
+      // Already in a stroke for this pen — do NOT restart (was cutting every glyph)
+      if (this.engine.getActive() || this.gestures.isDrawing()) {
+        this.gestures.stickyPenContact(ev.pointerId);
+        if (this.gestures.getActiveDrawId() !== ev.pointerId) {
+          this.gestures.bindPenForEnd(ev.pointerId);
+        }
+        return true;
+      }
       this.setPenInkingUi(true);
       this.clearTextSelection();
-      // Kill palm pan only when it is actually active (cheap re-down)
       if (this.scrollTouchId != null || this.flingRaf || this.panRaf) {
         stopFling();
         this.killPalmPanForPen(ev);
       } else {
         this.gestures.preemptForPen(ev.pointerId);
       }
-      // New tip-down while previous stroke still open → commit then start
-      if (this.engine.isStroking()) commitOpenStrokeNow();
       try {
         c.setPointerCapture(ev.pointerId);
       } catch {
@@ -1826,73 +1832,59 @@ export class PyoInkView extends ItemView {
       return true;
     };
 
-    /** buttons>0 latch for soft-lift (ignore pressure flicker mid-stroke). */
-    let penButtonsDown = false;
-
-    // Root capture: tip-down + soft-lift only. Hover moves must NOT be swallowed.
+    // Root capture: start on tip-down, extend on move, end ONLY on pointerup.
     const onPenDownCapture = (ev: PointerEvent) => {
       if (ev.pointerType !== "pen") return;
       if (!penSurface.contains(ev.target as Node) && ev.target !== c) return;
       if (this.gestures.navigateMode) return;
       updatePenHover(ev);
-      if (penTipDown(ev)) {
-        penButtonsDown = true;
-        startPenInk(ev, canvasRect());
-      } else {
-        penButtonsDown = false;
-      }
+      if (penTipDown(ev)) startPenInk(ev, canvasRect());
     };
     const onPenMoveCapture = (ev: PointerEvent) => {
       if (ev.pointerType !== "pen") return;
-      // Always drive hover ring first
       updatePenHover(ev);
 
       const tip = penTipDown(ev);
-      // Soft lift: tip buttons released while stroke open (Hangul jamo between sides)
-      if (penButtonsDown && !tip && (this.engine.isStroking() || this.gestures.isDrawing())) {
-        penButtonsDown = false;
-        if (this.gestures.getActiveDrawId() !== ev.pointerId) {
-          this.gestures.bindPenForEnd(ev.pointerId);
-        }
-        commitOpenStrokeNow();
-        this.gestures.releasePointer(ev.pointerId, "pen");
-        this.setPenInkingUi(false);
-        return;
-      }
+      const stroking =
+        this.engine.isStroking() ||
+        this.gestures.isDrawing() ||
+        this.engine.getActive() !== null;
 
-      if (!tip) {
-        penButtonsDown = false;
-        return; // pure hover — do not start ink, do not stopPropagation
-      }
+      // Hover only — never end a stroke here (soft-lift was cutting 획 mid-glyph)
+      if (!tip && !stroking) return;
 
-      penButtonsDown = true;
       const rect = canvasRect();
-      // Missed pointerdown recovery
-      if (!this.gestures.isDrawing() && !this.engine.getActive()) {
+
+      // Missed pointerdown: start only if tip is really down and no open stroke
+      if (tip && !stroking) {
         startPenInk(ev, rect);
       }
-      if (this.gestures.isDrawing() || this.engine.getActive()) {
+
+      // Extend open stroke until pointerup (even if buttons flickers to 0 briefly)
+      if (this.engine.getActive() || this.gestures.isDrawing()) {
         this.gestures.stickyPenContact(ev.pointerId);
-        if (this.gestures.getActiveDrawId() !== ev.pointerId) {
-          this.gestures.forcePenDrawStart(ev.pointerId);
+        if (this.gestures.getActiveDrawId() == null) {
+          this.gestures.bindPenForEnd(ev.pointerId);
         }
-        if (!this.engine.getActive()) this.beginInkFromEvent(ev, rect);
-        const samples = this.gestures.collectSamples(ev, rect);
-        this.handleGesture(
-          { type: "draw-move", pointerId: ev.pointerId, samples },
-          ev,
-          rect,
-        );
+        if (!this.engine.getActive() && tip) {
+          this.beginInkFromEvent(ev, rect);
+        } else if (this.engine.getActive()) {
+          const samples = this.gestures.collectSamples(ev, rect);
+          this.handleGesture(
+            { type: "draw-move", pointerId: ev.pointerId, samples },
+            ev,
+            rect,
+          );
+        }
         if (this.scrollTouchId != null) forceClearScroll("pen_move_writing");
         ev.preventDefault();
-        // Do NOT stopPropagation — allows canvas hover path / other listeners
       }
     };
     const onPenUpCapture = (ev: PointerEvent) => {
       if (ev.pointerType !== "pen") return;
-      penButtonsDown = false;
       updatePenHover(ev);
-      if (!this.engine.isStroking() && !this.gestures.isDrawing()) {
+      // The ONLY place a stroke ends (real tip lift)
+      if (!this.engine.isStroking() && !this.gestures.isDrawing() && !this.engine.getActive()) {
         this.setPenInkingUi(false);
         return;
       }
@@ -2488,7 +2480,7 @@ export class PyoInkView extends ItemView {
       snapshotAt: Date.now(),
     };
     this.doc.strokes = this.engine.exportStrokes();
-    this.doc.meta.appVersion = "0.5.10";
+    this.doc.meta.appVersion = "0.5.11";
     this.doc.settingsEcho = { penWidth: this.plugin.settings.penWidth, pfVersion: "1.2.3" };
     if (this.remoteNewer && this.dirty) {
       new Notice("PyoInk: remote ink changed — saving local will overwrite");
