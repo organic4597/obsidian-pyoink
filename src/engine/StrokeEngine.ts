@@ -100,11 +100,23 @@ export class StrokeEngine {
     if (!this.active) return false;
     this.active.ended = true;
     if (this.active.points.length >= 1) this.strokes.push(this.active);
+    const finished = this.active;
     this.active = null;
+    this._lastFinished = finished;
     return true;
   }
 
+  /** Last stroke committed by end() — for incremental cache stamp. */
+  private _lastFinished: InkStroke | null = null;
+
+  takeLastFinished(): InkStroke | null {
+    const s = this._lastFinished;
+    this._lastFinished = null;
+    return s;
+  }
+
   cancel() {
+    this._lastFinished = null;
     if (this.erasing) {
       if (this.eraseUndoPushed && this.undoStack.length) {
         this.strokes = this.undoStack.pop()!;
@@ -207,6 +219,24 @@ export class StrokeEngine {
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
     c.clearRect(0, 0, w, h);
     for (const s of this.strokes) this.paintStroke(c, s, true);
+  }
+
+  /** Append one finished stroke onto existing cache (fast path between pen lifts). */
+  stampStrokeToCache(
+    cache: HTMLCanvasElement,
+    stroke: InkStroke,
+    w: number,
+    h: number,
+    dpr: number,
+  ) {
+    if (cache.width < 1 || cache.height < 1) {
+      this.rebuildCache(cache, w, h, dpr);
+      return;
+    }
+    const c = cache.getContext("2d");
+    if (!c) return;
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.paintStroke(c, stroke, true);
   }
 
   private paintStroke(ctx: CanvasRenderingContext2D, s: InkStroke, last: boolean) {

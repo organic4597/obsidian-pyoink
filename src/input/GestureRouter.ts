@@ -363,20 +363,21 @@ export class GestureRouter {
       this.penDownIds.delete(ev.pointerId);
       this.lastPenAt = performance.now();
 
-      // Pencil tip double / single tap (barrel OS double-tap is NOT in WebView)
+      // Pencil tip double / single tap — MUST NOT fire during normal handwriting.
+      // Writing letters has many short lifts; loose thresholds caused undo/cycle ("drag weird").
       const sPen = s;
       const wasDrawing = this.activeDrawId === ev.pointerId;
       const holdMs = performance.now() - (this.penDownAt || performance.now());
       const sample = this.sampleFromEvent(ev, canvasRect);
-      // Looser thresholds — Pencil micro-jitter often exceeded 16px / 320ms
-      const shortTap = this.movedPx < 36 && holdMs < 480;
-      if (shortTap && wasDrawing && performance.now() - this.lastShortcutAt > 120) {
+      // True tip-tap only: almost a stationary poke
+      const tipTap = this.movedPx < 12 && holdMs < 200;
+      if (tipTap && wasDrawing && performance.now() - this.lastShortcutAt > 200) {
         const now = performance.now();
         // Double-tap first
         if (
           sPen.enablePencilDoubleTap !== false &&
-          now - this.lastPenTapAt < 560 &&
-          Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 72
+          now - this.lastPenTapAt < 380 &&
+          Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 40
         ) {
           this.lastPenTapAt = 0;
           this.lastShortcutAt = now;
@@ -402,7 +403,6 @@ export class GestureRouter {
           this.lastShortcutAt = now;
           this.clearActiveDraw();
           if (single === "none") {
-            // swallow short tap (no ink, no shortcut)
             return { type: "pen-single-tap", action: "none", pointerId: ev.pointerId };
           }
           return {
@@ -411,7 +411,10 @@ export class GestureRouter {
             pointerId: ev.pointerId,
           };
         }
-        // ink mode: fall through to draw-end (tiny mark). Double-tap undoes it.
+        // ink mode: fall through to draw-end
+      } else if (wasDrawing) {
+        // Real stroke — clear tip-tap memory so next letter isn't double-tap
+        this.lastPenTapAt = 0;
       }
     }
 

@@ -328,6 +328,8 @@ var StrokeEngine = class {
     this.eraseDirty = false;
     /** Snapshot index at erase start — discard if nothing removed */
     this.eraseUndoPushed = false;
+    /** Last stroke committed by end() — for incremental cache stamp. */
+    this._lastFinished = null;
   }
   setSettings(s2) {
     this.settings = s2;
@@ -399,10 +401,18 @@ var StrokeEngine = class {
     if (!this.active) return false;
     this.active.ended = true;
     if (this.active.points.length >= 1) this.strokes.push(this.active);
+    const finished = this.active;
     this.active = null;
+    this._lastFinished = finished;
     return true;
   }
+  takeLastFinished() {
+    const s2 = this._lastFinished;
+    this._lastFinished = null;
+    return s2;
+  }
   cancel() {
+    this._lastFinished = null;
     if (this.erasing) {
       if (this.eraseUndoPushed && this.undoStack.length) {
         this.strokes = this.undoStack.pop();
@@ -490,6 +500,17 @@ var StrokeEngine = class {
     c2.setTransform(dpr, 0, 0, dpr, 0, 0);
     c2.clearRect(0, 0, w2, h2);
     for (const s2 of this.strokes) this.paintStroke(c2, s2, true);
+  }
+  /** Append one finished stroke onto existing cache (fast path between pen lifts). */
+  stampStrokeToCache(cache, stroke, w2, h2, dpr) {
+    if (cache.width < 1 || cache.height < 1) {
+      this.rebuildCache(cache, w2, h2, dpr);
+      return;
+    }
+    const c2 = cache.getContext("2d");
+    if (!c2) return;
+    c2.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.paintStroke(c2, stroke, true);
   }
   paintStroke(ctx, s2, last) {
     const simulate = this.settings.simulatePressureFallback && (s2 === this.active ? !this.sawRealPressure : pressureMostlyFlat(s2.points));
@@ -780,10 +801,10 @@ var GestureRouter = class {
       const wasDrawing = this.activeDrawId === ev.pointerId;
       const holdMs = performance.now() - (this.penDownAt || performance.now());
       const sample = this.sampleFromEvent(ev, canvasRect);
-      const shortTap = this.movedPx < 36 && holdMs < 480;
-      if (shortTap && wasDrawing && performance.now() - this.lastShortcutAt > 120) {
+      const tipTap = this.movedPx < 12 && holdMs < 200;
+      if (tipTap && wasDrawing && performance.now() - this.lastShortcutAt > 200) {
         const now = performance.now();
-        if (sPen.enablePencilDoubleTap !== false && now - this.lastPenTapAt < 560 && Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 72) {
+        if (sPen.enablePencilDoubleTap !== false && now - this.lastPenTapAt < 380 && Math.hypot(sample.x - this.lastPenTapX, sample.y - this.lastPenTapY) < 40) {
           this.lastPenTapAt = 0;
           this.lastShortcutAt = now;
           this.clearActiveDraw();
@@ -810,6 +831,8 @@ var GestureRouter = class {
             pointerId: ev.pointerId
           };
         }
+      } else if (wasDrawing) {
+        this.lastPenTapAt = 0;
       }
     }
     if (ev.pointerType === "touch") {
@@ -2203,9 +2226,11 @@ var PyoInkView = class extends import_obsidian2.ItemView {
   }
   /**
    * After finger pan/zoom, leftover capture / activeDraw / non-ready state
-   * can make Pencil completely dead. Call on every pen pointerdown.
+   * can make Pencil completely dead. Call on pen pointerdown — keep LIGHT
+   * so normal lift→write has no lag.
    */
   ensurePenChannelLive(ev) {
+    const needTouchClear = this.scrollTouchId != null || this.flingRaf !== 0 || this.panRaf !== 0 || this.gestures.getActiveDrawId() !== null;
     if (this.scrollTouchId != null) {
       const id = this.scrollTouchId;
       this.scrollTouchId = null;
@@ -2214,7 +2239,6 @@ var PyoInkView = class extends import_obsidian2.ItemView {
         this.canvas.releasePointerCapture(id);
       } catch {
       }
-      inkLog("E_SCROLL_STUCK", "pen_preempt");
     }
     if (this.flingRaf) {
       cancelAnimationFrame(this.flingRaf);
@@ -2229,11 +2253,14 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       this.panPendingY = 0;
     }
     if (!this.gestures.navigateMode) {
-      this.canvas.classList.remove("is-pass-through");
-      this.canvas.style.pointerEvents = "auto";
+      if (this.canvas.classList.contains("is-pass-through")) {
+        this.canvas.classList.remove("is-pass-through");
+      }
+      if (this.canvas.style.pointerEvents === "none") {
+        this.canvas.style.pointerEvents = "auto";
+      }
     }
     if (this.state !== "ready" && this.state !== "stroking") {
-      inkLog("E_PTR_LOST", `pen_revive_state_${this.state}`);
       this.state = "ready";
     }
     if (this.engine.isStroking() && this.gestures.getActiveDrawId() === null) {
@@ -2244,7 +2271,11 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       }
       this.cacheValid = false;
     }
-    this.gestures.preemptForPen(ev.pointerId);
+    if (needTouchClear) {
+      this.gestures.preemptForPen(ev.pointerId);
+    } else {
+      this.gestures.preemptForPen(ev.pointerId);
+    }
   }
   cycleTool() {
     this.finishStrokeIfNeeded();
@@ -2855,9 +2886,24 @@ var PyoInkView = class extends import_obsidian2.ItemView {
       case "draw-end": {
         const changed = this.engine.end();
         this.state = "ready";
-        this.cacheValid = false;
-        if (changed) this.markDirty();
-        this.syncToolbar();
+        if (changed) {
+          this.markDirty();
+          const finished = this.engine.takeLastFinished();
+          const dpr = window.devicePixelRatio || 1;
+          if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
+            this.engine.stampStrokeToCache(
+              this.cacheCanvas,
+              finished,
+              this.cssW,
+              this.cssH,
+              dpr
+            );
+          } else {
+            this.cacheValid = false;
+          }
+        }
+        if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
+        if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
         this.requestRedraw();
         try {
           this.canvas.releasePointerCapture(ev.pointerId);

@@ -947,9 +947,16 @@ export class PyoInkView extends ItemView {
 
   /**
    * After finger pan/zoom, leftover capture / activeDraw / non-ready state
-   * can make Pencil completely dead. Call on every pen pointerdown.
+   * can make Pencil completely dead. Call on pen pointerdown — keep LIGHT
+   * so normal lift→write has no lag.
    */
   private ensurePenChannelLive(ev: PointerEvent) {
+    const needTouchClear =
+      this.scrollTouchId != null ||
+      this.flingRaf !== 0 ||
+      this.panRaf !== 0 ||
+      this.gestures.getActiveDrawId() !== null;
+
     // Drop stuck finger pan capture so canvas receives pen cleanly
     if (this.scrollTouchId != null) {
       const id = this.scrollTouchId;
@@ -960,7 +967,6 @@ export class PyoInkView extends ItemView {
       } catch {
         /* */
       }
-      inkLog("E_SCROLL_STUCK", "pen_preempt");
     }
     if (this.flingRaf) {
       cancelAnimationFrame(this.flingRaf);
@@ -977,17 +983,20 @@ export class PyoInkView extends ItemView {
 
     // Never leave canvas non-interactive for pen (unless true navigate mode)
     if (!this.gestures.navigateMode) {
-      this.canvas.classList.remove("is-pass-through");
-      this.canvas.style.pointerEvents = "auto";
+      if (this.canvas.classList.contains("is-pass-through")) {
+        this.canvas.classList.remove("is-pass-through");
+      }
+      if (this.canvas.style.pointerEvents === "none") {
+        this.canvas.style.pointerEvents = "auto";
+      }
     }
 
     // saving/loading/error must not eat Pencil forever
     if (this.state !== "ready" && this.state !== "stroking") {
-      inkLog("E_PTR_LOST", `pen_revive_state_${this.state}`);
       this.state = "ready";
     }
 
-    // Engine mid-stroke without gesture lock → finish orphan stroke
+    // Engine mid-stroke without gesture lock → finish orphan stroke (rare)
     if (this.engine.isStroking() && this.gestures.getActiveDrawId() === null) {
       try {
         this.engine.end();
@@ -997,7 +1006,13 @@ export class PyoInkView extends ItemView {
       this.cacheValid = false;
     }
 
-    this.gestures.preemptForPen(ev.pointerId);
+    // Only full preempt when touch/scroll left junk — not every pen down
+    if (needTouchClear) {
+      this.gestures.preemptForPen(ev.pointerId);
+    } else {
+      // Minimal: mark tip down for this id only
+      this.gestures.preemptForPen(ev.pointerId);
+    }
   }
 
   cycleTool() {
@@ -1701,9 +1716,26 @@ export class PyoInkView extends ItemView {
       case "draw-end": {
         const changed = this.engine.end();
         this.state = "ready";
-        this.cacheValid = false;
-        if (changed) this.markDirty();
-        this.syncToolbar();
+        if (changed) {
+          this.markDirty();
+          // Fast path: stamp finished stroke onto cache instead of full rebuild
+          const finished = this.engine.takeLastFinished();
+          const dpr = window.devicePixelRatio || 1;
+          if (finished && this.cacheCanvas && this.cacheValid && this.cssW > 0) {
+            this.engine.stampStrokeToCache(
+              this.cacheCanvas,
+              finished,
+              this.cssW,
+              this.cssH,
+              dpr,
+            );
+          } else {
+            this.cacheValid = false;
+          }
+        }
+        // Avoid full toolbar rebuild every stroke (was lag after each lift)
+        if (this.undoBtn) this.undoBtn.toggleAttribute("disabled", !this.engine.canUndo());
+        if (this.redoBtn) this.redoBtn.toggleAttribute("disabled", !this.engine.canRedo());
         this.requestRedraw();
         try {
           this.canvas.releasePointerCapture(ev.pointerId);
